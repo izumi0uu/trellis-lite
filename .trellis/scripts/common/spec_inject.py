@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Decision logic for path-scoped spec injection (ticket-refresh model).
+
+Pure logic only: the transcript clock, the per-spec decision engine, block
+rendering and budgeted payload assembly. Importing this module has no side
+effects; every piece of IO orchestration (stdin, config, identity, state files,
+locking, GC) lives in the hook that calls it —
+``.claude/hooks/inject-spec-context.py``. Unit tests import this module
+directly.
+
+Clock
+    A transcript's *turn* count is the number of real user turns: a line with
+    ``type == "user"``, a string ``message.content``, and no ``isMeta`` (tool
+    results and meta lines carry structured content and do not count). A
+    *boundary* is a ``type == "system"`` line with
+    ``subtype == "compact_boundary"``: the transcript is append-only, so a
+    boundary appearing after an emission means the injected text was compacted
+    away and must be re-taught in full.
+
+Budget
+    All caps are in characters, because the platform's ``additionalContext``
+    ceiling is 10,000 *characters* (counting bytes made CJK specs pay 3x).
+    Truncation slices code points, which can never split a multi-byte
+    sequence. The per-event cap is enforced on the assembled payload string —
+    wrappers, ``\\n\\n`` separators, index block and tickets all counted — so
+    nothing is ever appended unchecked.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+from pathlib import Path
+from typing import Any, Protocol, Sequence
+
+# Bound on how much of a transcript is scanned for the clock. Beyond this the
+# caller falls back to the wall clock rather than pay an unbounded read.
+TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
+
+# State record schema version. Records with any other version are ignored
+# (safe direction: an ignored record re-injects rather than stays silent).
+STATE_VERSION = 2
+
+# Substring prefilters applied before json.loads on each transcript line —
+# the vast majority of lines match neither and are never parsed.
+# Contract amendment 4: tolerate both JSON spacings — Claude Code emits
+# '"type":"user"' (no space) but a conforming producer may emit a space.
+_USER_PREFILTERS = (b'"type":"user"', b'"type": "user"')
+_BOUNDARY_PREFILTER = b'"compact_boundary"'
+
+
+class SpecCandidate(Protocol):
+    """Structural view of ``spec_match.SpecMatch`` (kept decoupled)."""
+
+    @property
+    def spec_path(self) -> Path: ...
+
+    @property
+    def rel_path(self) -> str: ...
+
+    @property
+    def description(self) -> str | None: ...
+
+
+def _warn(message: str) -> None:
+    print(f"[WARN] spec_inject: {message}", file=sys.stderr)
+
+
+# =============================================================================
+# Clock
+# =============================================================================
+
+
+def _is_real_turn(record: dict[str, Any]) -> bool:
+    """True for a real user turn (not a tool result, not a meta line)."""
+    if record.get("type") != "user":
+        return False
+    if record.get("isMeta"):
+        return False
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return False
+    return isinstance(message.get("content"), str)
+
+
+def _is_compact_boundary(record: dict[str, Any]) -> bool:
+    return (
+        record.get("type") == "system"
+        and record.get("subtype") == "compact_boundary"
+    )
+
+
+def scan_transcript(
+    path: str | None,
+    max_bytes: int = TRANSCRIPT_MAX_BYTES,
+) -> dict[str, int] | None:
+    """Return ``{"turns": int, "boundaries": int}`` for a transcript file.
+
+    Single pass, one line at a time, with a substring prefilter before any
+    ``json.loads``. Returns None when the path is empty, unreadable, or larger
+    than ``max_bytes`` — the caller then uses the wall clock.
+    """
+    if not isinstance(path, str) or not path.strip():
+        return None
+
+    turns = 0
+    boundaries = 0
+    read = 0
+    try:
+        with open(path.strip(), "rb") as f:
+            for raw in f:
+                read += len(raw)
+                if read > max_bytes:
+                    return None
+                is_user = any(p in raw for p in _USER_PREFILTERS)
+                is_boundary = _BOUNDARY_PREFILTER in raw
+                if not (is_user or is_boundary):
+                    continue
+                try:
+                    record = json.loads(raw)
+                except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if is_user and _is_real_turn(record):
+                    turns += 1
+                if is_boundary and _is_compact_boundary(record):
+                    boundaries += 1
+    except OSError:
+        return None
+
+    return {"turns": turns, "boundaries": boundaries}
+
+
+def within_window(
+    clock: dict[str, Any],
+    last: dict[str, Any],
+    win_turns: int,
+    win_seconds: int,
+) -> bool:
+    """True when the last emission is still inside the refresh window (→ stay
+    silent).
+
+    Compares turns-to-turns when both sides have a turn count, else
+    seconds-to-seconds; truly incomparable → past-window (False → refresh, the
+    over-inject side of the asymmetry). A window of ``0`` means never refresh
+    (infinite window → always True). A NEGATIVE delta is a clock anomaly
+    (wall-clock skew, a replaced transcript) and is treated as past-window,
+    again the safe direction.
+    """
+    cur_turns = clock.get("turns")
+    last_turns = last.get("turns")
+    if isinstance(cur_turns, int) and isinstance(last_turns, int):
+        if win_turns == 0:
+            return True
+        delta = cur_turns - last_turns
+        return 0 <= delta < win_turns
+
+    cur_ts = clock.get("ts")
+    last_ts = last.get("ts")
+    if isinstance(cur_ts, (int, float)) and isinstance(last_ts, (int, float)):
+        if win_seconds == 0:
+            return True
+        delta = cur_ts - last_ts
+        return 0 <= delta < win_seconds
+
+    return False
+
+
+def decide(
+    stateless: bool,
+    last: dict[str, Any] | None,
+    sha256_hex: str,
+    clock: dict[str, Any],
+    win_turns: int,
+    win_seconds: int,
+) -> str:
+    """Return one of ``"full"`` | ``"ticket"`` | ``"silent"`` for a spec.
+
+    Order is contractual: statelessness first (bounded cost, no state to
+    consult), then first sight, then content change, then compaction (the
+    injected text is genuinely gone — a ticket would point at a memory that no
+    longer exists), then the refresh window.
+    """
+    if stateless:
+        return "ticket"
+    if last is None:
+        return "full"
+    if last.get("sha256") != sha256_hex:
+        return "full"
+
+    cur_boundaries = clock.get("boundaries")
+    last_boundaries = last.get("boundaries")
+    if (
+        isinstance(cur_boundaries, int)
+        and isinstance(last_boundaries, int)
+        and cur_boundaries > last_boundaries
+    ):
+        return "full"
+
+    if within_window(clock, last, win_turns, win_seconds):
+        return "silent"
+    return "ticket"
+
+
+# =============================================================================
+# Rendering
+# =============================================================================
+
+
+def truncate_chars(text: str, cap: int) -> str:
+    """Slice ``text`` to at most ``cap`` code points. ``cap <= 0`` = no limit."""
+    if cap <= 0 or len(text) <= cap:
+        return text
+    return text[:cap]
+
+
+def truncation_notice(rel_path: str, cap: int) -> str:
+    return (
+        f"\n[Trellis: truncated at {cap} characters — "
+        f"read {rel_path} for the full content]"
+    )
+
+
+def render_full(edited_rel: str, spec_rel: str, sha12: str, body: str) -> str:
+    return (
+        f'<spec-context file="{edited_rel}" spec="{spec_rel}" sha256="{sha12}">\n'
+        f"{body}\n"
+        f"</spec-context>"
+    )
+
+
+def render_ticket(
+    edited_rel: str,
+    spec_rel: str,
+    sha12: str,
+    stateless: bool,
+) -> str:
+    """Render a ticket block.
+
+    ``stateless=True`` covers both the no-identity and circuit-breaker paths:
+    there is no record of a prior emission, so the wording must not claim one.
+    """
+    if stateless:
+        body = (
+            "This spec governs the file you just touched. If you have not read it in\n"
+            f"this session, Read {spec_rel} before continuing."
+        )
+    else:
+        body = (
+            "You were shown this spec earlier in this session and its content is unchanged.\n"
+            "It still governs edits to matching files. If you no longer remember it, Read\n"
+            f"{spec_rel} before continuing."
+        )
+    return (
+        f'<spec-ticket file="{edited_rel}" spec="{spec_rel}" sha256="{sha12}">\n'
+        f"{body}\n"
+        f"</spec-ticket>"
+    )
+
+
+def _index_block(lines: Sequence[str]) -> str:
+    return "<spec-index>\n" + "\n".join(lines) + "\n</spec-index>"
+
+
+# =============================================================================
+# State records
+# =============================================================================
+
+
+def make_record(
+    rel_path: str,
+    sha256_hex: str,
+    mode: str,
+    clock: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "v": STATE_VERSION,
+        "spec": rel_path,
+        "sha256": sha256_hex,
+        "mode": mode,
+        "ts": clock.get("ts"),
+        "turns": clock.get("turns"),
+        "boundaries": clock.get("boundaries"),
+    }
+
+
+# =============================================================================
+# Payload assembly
+# =============================================================================
+
+
+def _derive_fitting_full(
+    edited_rel: str,
+    spec_rel: str,
+    sha12: str,
+    text: str,
+    max_spec_chars: int,
+    fits,
+) -> str | None:
+    """Largest truncated FULL block that fits the remaining total budget.
+
+    Estimates the available body size from the empty-body wrapper and the
+    truncation notice, then walks down in small steps to absorb the
+    digit-length wobble of the notice text. Returns None when no non-empty
+    prefix fits (the caller degrades to an index line).
+    """
+    def candidate_for(cap: int) -> str:
+        body = truncate_chars(text, cap)
+        if len(body) < len(text):
+            body += truncation_notice(spec_rel, cap)
+        return render_full(edited_rel, spec_rel, sha12, body)
+
+    # Candidate length is monotone non-decreasing in the cap, so binary-search
+    # the largest cap whose block still fits the joined payload.
+    lo, hi = 1, max(1, max_spec_chars)
+    best: str | None = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = candidate_for(mid)
+        if fits(candidate):
+            best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def assemble_payload(
+    edited_rel: str,
+    matches: Sequence[SpecCandidate],
+    stateless: bool,
+    state_records: dict[str, dict[str, Any]],
+    clock: dict[str, Any],
+    max_spec_chars: int,
+    max_total_chars: int,
+    win_turns: int,
+    win_seconds: int,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Assemble the additionalContext payload from the matched specs.
+
+    Returns ``(payload, records)`` where ``records`` are the state lines to
+    append for the emissions that actually made it into the payload (silent
+    hits and budget-dropped emissions record nothing — they stay eligible).
+
+    Every candidate block is measured against the *assembled* payload string
+    (``"\\n\\n".join(...)``), so the per-event character ceiling holds for the
+    exact string that is emitted.
+    """
+    blocks: list[str] = []
+
+    def fits(candidate: str) -> bool:
+        if max_total_chars <= 0:
+            return True
+        return len("\n\n".join([*blocks, candidate])) <= max_total_chars
+
+    # Reserve room for the "(+N more)" summary while packing FULL blocks that
+    # still have candidates behind them — otherwise a derived-cap FULL can
+    # consume the whole budget and starve the index/summary (amendments 1+3
+    # would fight each other; measured: 10-spec fan-out at max_total_chars
+    # 3000 emitted one 3000-char FULL and dropped the other nine silently).
+    _summary_upper = (
+        f"- (+{len(matches)} more governing specs over budget — run "
+        f"get_context.py --mode spec --file {edited_rel} to list them)"
+    )
+    _reserve = len("\n\n" + _index_block([_summary_upper]))
+
+    def fits_reserved(candidate: str, more_after: bool) -> bool:
+        if max_total_chars <= 0:
+            return True
+        used = len("\n\n".join([*blocks, candidate]))
+        if more_after:
+            return used + _reserve <= max_total_chars
+        return used <= max_total_chars
+
+    index_lines: list[str] = []
+    ticket_pending: list[tuple[str, str]] = []  # (spec_rel, sha256_hex)
+    records: list[dict[str, Any]] = []
+
+    for match_idx, match in enumerate(matches):
+        try:
+            data = match.spec_path.read_bytes()
+        except OSError:
+            _warn(f"cannot read {match.rel_path} — skipped")
+            continue
+
+        sha256_hex = hashlib.sha256(data).hexdigest()
+        sha12 = sha256_hex[:12]
+        last = None if stateless else state_records.get(match.rel_path)
+        decision = decide(stateless, last, sha256_hex, clock, win_turns, win_seconds)
+
+        if decision == "silent":
+            continue
+
+        if decision == "ticket":
+            # Deferred: tickets are counted against the budget last.
+            ticket_pending.append((match.rel_path, sha256_hex))
+            continue
+
+        more_after = match_idx < len(matches) - 1 or bool(index_lines)
+        _fits = (lambda c: fits_reserved(c, more_after))
+
+        text = data.decode("utf-8", errors="replace")
+        body = truncate_chars(text, max_spec_chars)
+        if len(body) < len(text):
+            body += truncation_notice(match.rel_path, max_spec_chars)
+        block = render_full(edited_rel, match.rel_path, sha12, body)
+        if not _fits(block):
+            # Contract amendment 1: before degrading, truncate FURTHER to the
+            # largest body prefix that fits the remaining total budget
+            # (wrapper + notice counted). Without this, the frozen defaults
+            # made the truncation path unreachable (body cap + notice +
+            # wrapper > total cap) and long specs fell straight to an index
+            # line — the rejected index-only mode by another route.
+            derived = _derive_fitting_full(
+                edited_rel, match.rel_path, sha12, text, max_spec_chars, _fits
+            )
+            if derived is not None:
+                blocks.append(derived)
+                records.append(
+                    make_record(match.rel_path, sha256_hex, "full", clock)
+                )
+                continue
+            # No usable prefix fits — degrade to an index line, never drop
+            # silently. Not recorded: stays eligible for a later event.
+            description = match.description or "no description"
+            index_lines.append(f"- {match.rel_path} — {description}")
+            continue
+        blocks.append(block)
+        records.append(make_record(match.rel_path, sha256_hex, "full", clock))
+
+    if index_lines:
+        # The index block is budget-bounded too: lines that do not fit collapse
+        # into one summary line (count + how to list them via pull mode) so the
+        # ceiling is honored without silently dropping a governing spec.
+        chosen: list[str] = []
+        dropped = 0
+        for line in index_lines:
+            if fits(_index_block([*chosen, line])):
+                chosen.append(line)
+            else:
+                dropped += 1
+        if dropped:
+            # Contract amendment 3: the summary must actually be reachable.
+            # Greedy packing rarely leaves a summary-sized gap, so pop chosen
+            # lines (re-counting them as dropped) until the summary fits —
+            # only an absurdly small total budget can drop it entirely.
+            while True:
+                summary = (
+                    f"- (+{dropped} more governing specs over budget — run "
+                    f"get_context.py --mode spec --file {edited_rel} to list them)"
+                )
+                if fits(_index_block([*chosen, summary])):
+                    chosen.append(summary)
+                    break
+                if not chosen:
+                    _warn(
+                        f"spec index summary for {edited_rel} dropped — "
+                        f"per-event budget exhausted"
+                    )
+                    break
+                chosen.pop()
+                dropped += 1
+        if chosen:
+            blocks.append(_index_block(chosen))
+
+    for spec_rel, sha256_hex in ticket_pending:
+        ticket = render_ticket(edited_rel, spec_rel, sha256_hex[:12], stateless)
+        if not fits(ticket):
+            _warn(f"ticket for {spec_rel} dropped — per-event budget exhausted")
+            continue
+        blocks.append(ticket)
+        records.append(make_record(spec_rel, sha256_hex, "ticket", clock))
+
+    return "\n\n".join(blocks), records

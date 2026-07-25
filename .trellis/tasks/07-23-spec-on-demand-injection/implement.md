@@ -94,3 +94,71 @@ implementation: grep spec consumers for leading-`---` sensitivity).
       windows); config comment style consistent.
 - [ ] V4. Full gate (lint/typecheck/lint:py/full suite LC_ALL=C) + trellis-check
       + commit + push (updates draft PR #468) + PR body refresh.
+
+
+---
+
+# Stage R — review revision (2026-07-25)
+
+taosu's PR #468 review, frozen in design.md "Review revision (2026-07-25)".
+Implemented exactly as written; contract-inherent gaps found during validation
+were reported for a contract decision, not improvised away.
+
+- [x] R1. Budgets in characters: `max_spec_chars` 9400 / `max_total_chars`
+      9500; hard ceiling enforced on the assembled payload string (wrappers,
+      `\n\n` separators, `<spec-index>` block, `(+N more)` summary, tickets
+      all counted); code-point truncation — byte-level truncate_utf8 removed
+      from this hook.
+- [x] R2. Clock = real user turns (`type=="user"` + string `message.content` +
+      no `isMeta`), `refresh_window_lines` → `refresh_window_turns` (30);
+      `compact_boundary` count rule in decide() before the window check;
+      negative delta demoted to a plain clock-anomaly guard (no /compact
+      claim); single-pass scan with byte prefilters, 64 MiB cap → wall clock.
+- [x] R3. Subagent clock reads the subagent's own derived transcript
+      (`<dir>/<parent stem>/subagents/agent-<id>.jsonl`); absent → wall
+      clock, never the parent's counts; `+a-<agent_id>` identity split
+      unchanged.
+- [x] R4. State: one `<identity>.jsonl` per identity (no pid shards); `v:2`
+      records with turns+boundaries, `v != 2` ignored; best-effort
+      fcntl.flock held across read→decide→append.
+- [x] R5. Fail-closed: open-for-append doubles as the writability probe →
+      stateless ticket-only circuit breaker; GC exact-depth
+      `<base>/<16-hex>/<name>.jsonl` with the frozen name pattern, hourly
+      `.last-gc` gate, 48 h age, no rglob.
+- [x] R6. Robustness: validate_glob whitelist → deny-list; stateless ticket
+      wording (no prior-exposure claim); frontmatter tolerance (block
+      scalars, stray list items, unknown line shapes); Windows stdin
+      reconfigured alongside stdout; settings.json single PostToolUse entry
+      with matcher "Read|Edit|Write|MultiEdit" + `spec_injection.tools`
+      config filter.
+- [x] R7. Pure logic extracted to `common/spec_inject.py` (template + live
+      twin, registered in templates/trellis/index.ts); hook reduced to IO
+      shell; read+hash-before-decide kept (accepted trade-off, recorded in
+      design.md).
+- [x] R8. truncate_utf8 boundary fix back-ported to
+      inject-subagent-context.py (template + .claude/.cursor live twins) and
+      the TS mirror truncateUtf8 in pi/extensions/trellis/index.ts.txt;
+      taosu's exact repros added as regression tests in
+      context-injection-limits.integration.test.ts (24/24 green, 3 new).
+- [x] R-docs. `.trellis/spec/cli/backend/spec-injection.md` fully synced to
+      R1-R7 (byte budgets, line clock, pid shards, negative-delta-as-/compact,
+      glob whitelist and four-matcher registration removed);
+      script-conventions.md grepped for spec-hook budget references — none,
+      left untouched.
+
+Validation commands used:
+
+- `pnpm lint && pnpm typecheck` (repo root) — clean
+- `cd packages/cli && pnpm lint:py` — 0 errors, warning count = HEAD baseline
+- `python3 -m py_compile` on every changed hook/module — OK
+- Hermetic smoke matrix against the frozen contract via fabricated
+  PostToolUse stdin + `TRELLIS_SPEC_STATE_DIR` — 26/26 green
+- `LC_ALL=C LANG=C pnpm vitest run
+  test/scripts/context-injection-limits.integration.test.ts` (R8) — 24/24
+- Template/live mirror byte-equality checks after every twin patch
+
+Open items carried to V4: rework the 11 pre-review test assertions in
+spec-injection.integration.test.ts + claude.test.ts to the R-contract; contract
+decisions on the three reported gaps (9400/9500 makes the truncation path
+unreachable; the GC name pattern cannot match `+a-` subagent shards; the
+`(+N more)` summary is nearly unreachable under the greedy index packer).

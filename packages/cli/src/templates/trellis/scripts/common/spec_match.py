@@ -18,7 +18,15 @@ The parser is hand-rolled (house pattern, modeled on
 bounded head of each file (8 KiB / 100 lines, whichever ends first). Only
 files whose first line is exactly ``---`` are considered. ``name:`` /
 ``description:`` single-line strings are recognized (description is reused in
-index lines); unknown keys are ignored.
+index lines).
+
+The parser is deliberately tolerant — a spec is prose that happens to carry a
+routing hint, not a config file. Unknown keys, unrecognized line shapes and
+stray ``- item`` lines are ignored; block scalars (``key: >`` / ``key: |``)
+consume their more-indented continuation lines, so a SKILL.md-style
+``description: >`` paragraph does not disqualify the file. Only a malformed
+``paths:`` itself (a scalar where a list belongs) is an error: that key is the
+one thing the rest of the pipeline depends on.
 
 Glob grammar (repo-relative, POSIX separators):
 
@@ -28,9 +36,13 @@ Glob grammar (repo-relative, POSIX separators):
 - a trailing ``/`` is sugar for ``/**``
 - ``**`` embedded in a segment with other characters degrades to ``*``
 
-Validation: globs must be repo-relative (no leading ``/``), contain no ``..``
-segments, and use only characters in ``[A-Za-z0-9_./*?-]``. An invalid glob
-is skipped with a stderr warning; the rest of the file's globs still apply.
+Validation rejects only what is unsafe or meaningless: empty globs, a leading
+``/`` (globs are repo-relative), ``..`` segments, backslashes (POSIX
+separators only) and control characters. Everything else is legal — real
+repositories carry ``@scope`` packages, ``[slug]`` routes, ``(marketing)``
+groups and non-ASCII directories, and the translation escapes literals
+character by character. An invalid glob is skipped with a stderr warning; the
+rest of the file's globs still apply.
 
 Translation examples (glob → matches / non-matches):
 
@@ -69,8 +81,10 @@ from .paths import DIR_SPEC, DIR_WORKFLOW
 HEAD_MAX_BYTES = 8192
 HEAD_MAX_LINES = 100
 
-_GLOB_CHARSET_RE = re.compile(r"^[A-Za-z0-9_./*?-]+$")
+_GLOB_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(.*)$")
+# YAML block-scalar introducers; the value lives in the indented lines below.
+_BLOCK_SCALARS = ("|", ">", "|-", ">-", "|+", ">+")
 
 
 @dataclass(frozen=True)
@@ -129,9 +143,10 @@ def parse_spec_frontmatter(head_text: str) -> SpecFrontmatter | None:
     """Parse the optional frontmatter block from a spec file's head.
 
     Returns None when the file has no frontmatter (first line is not ``---``).
-    Raises ValueError on malformed frontmatter (e.g. non-list ``paths:``,
-    unrecognized line shapes). The scan ends at the closing ``---`` or at the
-    head-read bound (HEAD_MAX_LINES), whichever comes first.
+    Raises ValueError only on a malformed ``paths:`` key (a scalar where a list
+    belongs); every other line shape is tolerated and ignored. The scan ends at
+    the closing ``---`` or at the head-read bound (HEAD_MAX_LINES), whichever
+    comes first.
     """
     lines = head_text.splitlines()[:HEAD_MAX_LINES]
     if not lines:
@@ -144,29 +159,45 @@ def parse_spec_frontmatter(head_text: str) -> SpecFrontmatter | None:
     name: str | None = None
     description: str | None = None
     pending_key: str | None = None
+    block_indent: int | None = None
 
-    for line_no, line in enumerate(lines[1:], start=2):
+    for line in lines[1:]:
         stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+
+        if block_indent is not None:
+            # Inside a block scalar: everything more indented (and blank lines)
+            # is its value. A dedent ends the block; that line still counts.
+            if not stripped or indent > block_indent:
+                continue
+            block_indent = None
+
         if stripped == "---":
             break
         if not stripped or stripped.startswith("#"):
             continue
 
         if stripped == "-" or stripped.startswith("- "):
-            if pending_key is None:
-                raise ValueError(f"list item outside a key (line {line_no})")
             if pending_key == "paths" and paths is not None:
                 item = _unquote(_strip_inline_comment(stripped[1:].strip()).strip())
                 paths.append(item)
-            # List items under unknown keys are tolerated and ignored.
+            # List items outside `paths:` are tolerated and ignored.
             continue
 
         key_match = _KEY_RE.match(stripped)
         if key_match is None:
-            raise ValueError(f"unrecognized line {line_no}: {stripped[:60]!r}")
+            continue  # Unrecognized line shape \u2014 tolerated and ignored.
 
         key = key_match.group(1)
-        value = _unquote(_strip_inline_comment(key_match.group(2)).strip())
+        raw_value = key_match.group(2).strip()
+        if raw_value in _BLOCK_SCALARS:
+            if key == "paths":
+                raise ValueError("'paths' must be a list of globs")
+            pending_key = None
+            block_indent = indent
+            continue
+
+        value = _unquote(_strip_inline_comment(raw_value).strip())
         if value:
             pending_key = None
             if key == "paths":
@@ -189,15 +220,23 @@ def parse_spec_frontmatter(head_text: str) -> SpecFrontmatter | None:
 
 
 def validate_glob(glob: str) -> str | None:
-    """Return an error message for an invalid glob, or None when valid."""
+    """Return an error message for an invalid glob, or None when valid.
+
+    Deny-list, not allow-list: only what is unsafe or meaningless is rejected
+    (see module docstring). Everything else — ``@scope``, ``[slug]``,
+    ``(marketing)``, non-ASCII directory names — is a legal path in a real
+    repository and translates fine.
+    """
     if not glob:
         return "empty glob"
-    if not _GLOB_CHARSET_RE.match(glob):
-        return "contains characters outside [A-Za-z0-9_./*?-]"
     if glob.startswith("/"):
         return "absolute paths are not allowed (globs are repo-relative)"
     if ".." in glob.split("/"):
         return "'..' segments are not allowed"
+    if "\\" in glob:
+        return "backslashes are not allowed (globs use POSIX '/' separators)"
+    if _GLOB_CONTROL_RE.search(glob):
+        return "contains control characters"
     return None
 
 

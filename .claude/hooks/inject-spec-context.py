@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Path-Scoped Spec Context Injection Hook (ticket-refresh model, v2)
+Path-Scoped Spec Context Injection Hook (ticket-refresh model)
 
 When the agent touches a file, the specs that govern that file are surfaced
 right then — small, relevant, budgeted — instead of everything up front or
 nothing at all. Spec .md files under .trellis/spec/ declare which code paths
 they govern via YAML frontmatter (`paths:` glob list); the matching engine
-lives in .trellis/scripts/common/spec_match.py.
+lives in .trellis/scripts/common/spec_match.py and the decision engine in
+.trellis/scripts/common/spec_inject.py. This file is the IO shell: stdin,
+config, identity, state files, locking, GC, one print.
 
-Trigger: PostToolUse (matchers: Read, Edit, Write, MultiEdit) — registered on
+Trigger: PostToolUse (matcher "Read|Edit|Write|MultiEdit") — registered on
 Claude Code only this iteration. The script keeps the shared-hooks
 platform-neutral shape so later platform registrations are wiring-only.
 
@@ -17,40 +19,50 @@ Behavior — per matched spec, per event (recency-decay aware):
 
     h    = sha256(spec bytes)
     last = newest emission recorded for (identity, spec)   # stateless → None
-    if stateless:              emit TICKET   # bounded cost, always
-    elif last is None:         emit FULL     # first time this session
-    elif last.sha256 != h:     emit FULL     # spec changed → re-teach
-    elif within window:        silent        # fixed window; no state append
-    else:                      emit TICKET   # refresh attention cheaply
+    if stateless:               emit TICKET  # bounded cost, always
+    elif last is None:          emit FULL    # first time this session
+    elif last.sha256 != h:      emit FULL    # spec changed → re-teach
+    elif compacted since last:  emit FULL    # the text is gone, re-teach
+    elif within window:         silent       # fixed window; no state append
+    else:                       emit TICKET  # refresh attention cheaply
 
 A FULL block inlines the (budgeted) spec body with a sha256 attr; a TICKET is
-a few-hundred-byte reminder pointing back at the spec. Both append a state
-record; silent hits do not (fixed window, not sliding — continuous editing is
-exactly when drift is worst).
+a short reminder pointing back at the spec. Both append a state record; silent
+hits do not (fixed window, not sliding — continuous editing is exactly when
+drift is worst).
 
 Identity ladder (misfire asymmetry: a collision that MISSES an injection is
 unacceptable; drift that OVER-injects is fine):
   T1  session_id | conversation_id | sessionID (+ agent_id when present, so a
       subagent never shares state with its parent).
   T2  transcript_path (hashed).
-  T4  none of the above → stateless: no state IO at all, every hit is a TICKET.
+  T4  none of the above, or an unwritable state dir → stateless: no state IO
+      at all, every hit is a TICKET (circuit breaker — never a FULL re-emission
+      loop).
 
-State: user-global, out of the repo, append-only JSONL sharded per pid under
-${TRELLIS_SPEC_STATE_DIR:-~/.trellis/spec-inject}/<project16>/<identity>.<pid>.jsonl.
-Shards merge on read (newest record per spec wins); all state IO is best-effort
-and degrades toward emitting. A once-per-hour GC prunes shards older than 48 h.
+State: user-global, out of the repo, one append-only JSONL file per identity
+under ${TRELLIS_SPEC_STATE_DIR:-~/.trellis/spec-inject}/<project16>/<identity>.jsonl.
+A best-effort fcntl lock is held across read→decide→append; where fcntl is
+unavailable (Windows) the short O_APPEND writes stay atomic enough and the
+worst case is a duplicate injection. All state IO degrades toward emitting.
+A once-per-hour GC prunes conforming shards older than 48 h.
 
-Budget (config.yaml `spec_injection:`): per-spec cap `max_spec_bytes`
-(default 8192) with UTF-8-safe truncation + in-body notice; per-event cap
-`max_total_bytes` (default 9000 — Claude Code's documented additionalContext
-ceiling is 10,000 chars, stay under with margin). Once the total budget is
-exhausted, remaining FULL bodies degrade to one <spec-index> block; tickets are
-counted last and dropped (with a stderr warning) only if even they do not fit.
+Clock: real user turns (and /compact boundaries) counted from the transcript —
+the subagent's own transcript when the event carries an agent_id, never the
+parent's. No readable transcript → wall clock.
 
-Refresh windows (config.yaml `spec_injection:`): `refresh_window_lines`
-(default 300; transcript-line clock) and `refresh_window_seconds` (default
-2700; wall-clock fallback). Either `0` = never refresh in that clock mode
-(both `0` reproduces the legacy inject-once behavior).
+Budget (config.yaml `spec_injection:`): per-spec cap `max_spec_chars`
+(default 9400) with code-point truncation + in-body notice; per-event cap
+`max_total_chars` (default 9500 — Claude Code's documented additionalContext
+ceiling is 10,000 characters, stay under with margin). Once the total budget
+is exhausted, remaining FULL bodies degrade to one <spec-index> block; tickets
+are counted last and dropped (with a stderr warning) only if even they do not
+fit.
+
+Refresh windows (config.yaml `spec_injection:`): `refresh_window_turns`
+(default 30; real user turns) and `refresh_window_seconds` (default 2700;
+wall-clock fallback). Either `0` = never refresh in that clock mode (both `0`
+reproduces the legacy inject-once behavior).
 
 Never blocks, never crashes: non-matching events, missing file_path, no
 matches, any internal error → exit 0 with no stdout (stderr warnings allowed).
@@ -69,14 +81,26 @@ import sys
 import time
 from pathlib import Path
 
-# IMPORTANT: Force stdout to use UTF-8 on Windows
-# This fixes UnicodeEncodeError when outputting non-ASCII characters
+# IMPORTANT: Force UTF-8 on Windows for the streams this hook uses.
+# stdin carries the payload (non-ASCII file paths), stdout carries the spec
+# bodies; without this the default ANSI codepage raises UnicodeDecodeError /
+# UnicodeEncodeError.
 if sys.platform.startswith("win"):
     import io as _io
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
-    elif hasattr(sys.stdout, "detach"):
-        sys.stdout = _io.TextIOWrapper(sys.stdout.detach(), encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    for _stream_name in ("stdin", "stdout"):
+        _stream = getattr(sys, _stream_name, None)
+        if _stream is None:
+            continue
+        if hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+            except Exception:
+                pass  # Optional Windows stream setup; keep hook startup non-fatal.
+        elif hasattr(_stream, "detach"):
+            try:
+                setattr(sys, _stream_name, _io.TextIOWrapper(_stream.detach(), encoding="utf-8", errors="replace"))
+            except Exception:
+                pass  # Optional Windows stream setup; keep hook startup non-fatal.
 
 
 # =============================================================================
@@ -87,16 +111,19 @@ DIR_WORKFLOW = ".trellis"
 DIR_SPEC = "spec"
 
 # Tools whose events trigger spec matching (Claude Code tool names). Touching a
-# file — even a Read — counts; the miss path stays a fast exit.
-EDIT_TOOLS = ("Read", "Edit", "Write", "MultiEdit")
+# file — even a Read — counts; the miss path stays a fast exit. Overridable via
+# config `spec_injection.tools` (e.g. to drop "Read").
+DEFAULT_EDIT_TOOLS = ("Read", "Edit", "Write", "MultiEdit")
 
-# Budget defaults sized against Claude Code's documented 10,000-character
-# additionalContext ceiling — stay under with margin. `0` = unlimited.
-DEFAULT_MAX_SPEC_BYTES = 8192
-DEFAULT_MAX_TOTAL_BYTES = 9000
+# Budget defaults sized against Claude Code's documented 10,000-CHARACTER
+# additionalContext ceiling — stay under with margin, and leave the per-spec
+# cap enough wrapper room that a spec at the cap still lands whole.
+# `0` = unlimited.
+DEFAULT_MAX_SPEC_CHARS = 9400
+DEFAULT_MAX_TOTAL_CHARS = 9500
 
 # Refresh-window defaults. `0` (either key) = never refresh in that clock mode.
-DEFAULT_REFRESH_WINDOW_LINES = 300
+DEFAULT_REFRESH_WINDOW_TURNS = 30
 DEFAULT_REFRESH_WINDOW_SECONDS = 2700
 
 # State-file base dir (overridable for tests / hermeticity) and GC policy.
@@ -106,11 +133,17 @@ GC_MARKER = ".last-gc"
 GC_INTERVAL_SECONDS = 60 * 60          # GC runs at most once per hour
 STATE_MAX_AGE_SECONDS = 48 * 60 * 60   # shards older than this are pruned
 
-# Bound on how much of a transcript we scan for the line clock. Beyond this we
-# fall back to the wall clock rather than pay an unbounded read every event.
-TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
+# GC scope: exactly `<base>/<project16>/<identity>[.<pid>].jsonl`, never a
+# recursive walk — a hostile or mistyped TRELLIS_SPEC_STATE_DIR must not turn
+# this hook into an unlink loop over someone's files. The optional `.<pid>`
+# alternative covers shards written by the pre-lock layout.
+GC_PROJECT_DIR_RE = re.compile(r"^[0-9a-f]{16}$")
+# `+` is part of the identity charset: subagent shards use the `+a-<agent_id>`
+# suffix (contract amendment 2 — without it those shards were never pruned).
+GC_SHARD_NAME_RE = re.compile(r"^[A-Za-z0-9_+-]+(\.[0-9]+)?\.jsonl$")
 
-STATE_VERSION = 1
+# Subagent ids are uuid-shaped; anything else is not used to build a path.
+AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _warn(message: str) -> None:
@@ -131,6 +164,12 @@ def find_trellis_root(start: Path) -> Path | None:
     return None
 
 
+def _scripts_dir_on_path(root: Path) -> None:
+    scripts_dir = root / DIR_WORKFLOW / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+
+
 # =============================================================================
 # Config (.trellis/config.yaml `spec_injection:` section)
 # =============================================================================
@@ -142,9 +181,7 @@ def _read_trellis_config(root: Path) -> dict:
     The helper lives in .trellis/scripts/common; the hook lives outside the
     scripts tree, so we extend sys.path before importing.
     """
-    scripts_dir = root / DIR_WORKFLOW / "scripts"
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
+    _scripts_dir_on_path(root)
     try:
         from common.trellis_config import read_trellis_config  # type: ignore[import-not-found]
     except Exception:
@@ -157,28 +194,34 @@ def _read_trellis_config(root: Path) -> dict:
 
 def get_spec_injection_settings(
     root: Path,
-) -> tuple[bool, int, int, int, int]:
-    """Return (enabled, max_spec_bytes, max_total_bytes,
-    refresh_window_lines, refresh_window_seconds).
+) -> tuple[bool, int, int, int, int, tuple[str, ...]]:
+    """Return (enabled, max_spec_chars, max_total_chars,
+    refresh_window_turns, refresh_window_seconds, tools).
 
     Reads the ``spec_injection:`` section of ``.trellis/config.yaml``:
 
         spec_injection:
           enabled: true
-          max_spec_bytes: 8192
-          max_total_bytes: 9000
-          refresh_window_lines: 300
+          max_spec_chars: 9400
+          max_total_chars: 9500
+          refresh_window_turns: 30
           refresh_window_seconds: 2700
+          tools:
+            - Read
+            - Edit
+            - Write
+            - MultiEdit
 
     Missing keys use their defaults; ``0`` disables the corresponding limit
-    (byte caps) or refresh (window keys). Invalid values fall back to the
+    (character caps) or refresh (window keys). Invalid values fall back to the
     default for that key with a stderr warning.
     """
     enabled = True
+    tools = DEFAULT_EDIT_TOOLS
     numbers = {
-        "max_spec_bytes": DEFAULT_MAX_SPEC_BYTES,
-        "max_total_bytes": DEFAULT_MAX_TOTAL_BYTES,
-        "refresh_window_lines": DEFAULT_REFRESH_WINDOW_LINES,
+        "max_spec_chars": DEFAULT_MAX_SPEC_CHARS,
+        "max_total_chars": DEFAULT_MAX_TOTAL_CHARS,
+        "refresh_window_turns": DEFAULT_REFRESH_WINDOW_TURNS,
         "refresh_window_seconds": DEFAULT_REFRESH_WINDOW_SECONDS,
     }
 
@@ -214,72 +257,40 @@ def get_spec_injection_settings(
                 continue
             numbers[key] = value
 
+        if "tools" in section:
+            raw_tools = section["tools"]
+            if isinstance(raw_tools, list):
+                # An empty list is a deliberate "never trigger" — respected.
+                tools = tuple(
+                    t.strip() for t in raw_tools if isinstance(t, str) and t.strip()
+                )
+            else:
+                _warn(
+                    f"invalid spec_injection.tools value: {raw_tools!r}; "
+                    f"using default {list(DEFAULT_EDIT_TOOLS)}"
+                )
+
     return (
         enabled,
-        numbers["max_spec_bytes"],
-        numbers["max_total_bytes"],
-        numbers["refresh_window_lines"],
+        numbers["max_spec_chars"],
+        numbers["max_total_chars"],
+        numbers["refresh_window_turns"],
         numbers["refresh_window_seconds"],
+        tools,
     )
 
 
 # =============================================================================
-# UTF-8-safe truncation (issue #441 conventions; self-contained copy —
-# shared-hooks scripts are standalone by design)
-# =============================================================================
-
-
-def truncate_utf8(data: bytes, cap: int) -> bytes:
-    """Truncate ``data`` to at most ``cap`` bytes without splitting a UTF-8
-    multi-byte sequence.
-
-    ``cap <= 0`` means "no limit" — returns ``data`` unchanged.
-    """
-    if cap <= 0 or len(data) <= cap:
-        return data
-
-    truncated = data[:cap]
-    i = len(truncated)
-    # Back off over continuation bytes (10xxxxxx) to find the lead byte.
-    while i > 0 and (truncated[i - 1] & 0xC0) == 0x80:
-        i -= 1
-    if i == 0:
-        return b""
-
-    lead = truncated[i - 1]
-    if lead & 0x80:
-        if (lead & 0xE0) == 0xC0:
-            seq_len = 2
-        elif (lead & 0xF0) == 0xE0:
-            seq_len = 3
-        elif (lead & 0xF8) == 0xF0:
-            seq_len = 4
-        else:
-            seq_len = 1
-        # Cut before the lead byte when its full sequence didn't fit;
-        # otherwise the trailing sequence is complete — keep it whole.
-        if (i - 1) + seq_len > len(truncated):
-            return truncated[: i - 1]
-
-    return truncated
-
-
-def _truncate_notice(path: str, cap: int) -> str:
-    return f"\n[Trellis: truncated at {cap} bytes — read {path} for the full content]"
-
-
-# =============================================================================
-# Identity ladder + clock
+# Identity ladder
 # =============================================================================
 
 
 def _sanitize(raw: str) -> str:
     """Collapse a session/agent id into a filename-safe token.
 
-    Restricts to ``[A-Za-z0-9_-]`` (no ``.`` — the shard glob merges on
-    ``<identity>.*.jsonl`` and a dot would blur the pid boundary). Degenerate
-    inputs (all-special) fall back to a hash so distinct sessions never share
-    an identity (collision → missed injection is the unacceptable failure).
+    Restricts to ``[A-Za-z0-9_-]``. Degenerate inputs (all-special) fall back
+    to a hash so distinct sessions never share an identity (collision → missed
+    injection is the unacceptable failure).
     """
     raw = raw.strip()
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", raw).strip("_-")
@@ -303,9 +314,7 @@ def _shared_context_key(root: Path, payload: dict) -> str | None:
     nothing.
     """
     try:
-        scripts_dir = root / DIR_WORKFLOW / "scripts"
-        if str(scripts_dir) not in sys.path:
-            sys.path.insert(0, str(scripts_dir))
+        _scripts_dir_on_path(root)
         from common.active_task import resolve_context_key  # type: ignore[import-not-found]
 
         key = resolve_context_key(payload, allow_environment_context=False)
@@ -356,30 +365,41 @@ def resolve_identity(root: Path, payload: dict) -> tuple[str, bool]:
     return identity, False
 
 
-def _transcript_line_count(transcript_path: str | None) -> int | None:
-    """Count newlines in the transcript (buffered, bounded). None if the file
-    is unreadable, absent, or larger than TRANSCRIPT_MAX_BYTES."""
-    if not isinstance(transcript_path, str) or not transcript_path.strip():
+# =============================================================================
+# Clock source (subagent-aware)
+# =============================================================================
+
+
+def clock_transcript_path(payload: dict) -> str | None:
+    """Transcript whose turns/boundaries measure THIS agent's context.
+
+    With an ``agent_id``, that is the subagent's own transcript, which Claude
+    Code writes next to the parent's as
+    ``<dir>/<parent stem>/subagents/agent-<agent_id>.jsonl``. If that file is
+    absent we return None (→ wall clock) and never fall back to the parent's
+    counts: the parent idles while the subagent works, so its clock would
+    under-count and under-inject — the unacceptable direction.
+    """
+    raw = payload.get("transcript_path")
+    transcript = raw.strip() if isinstance(raw, str) else ""
+
+    raw_agent = payload.get("agent_id")
+    agent = raw_agent.strip() if isinstance(raw_agent, str) else ""
+    if not agent:
+        return transcript or None
+
+    if not transcript or not AGENT_ID_RE.match(agent):
         return None
     try:
-        count = 0
-        read = 0
-        with open(transcript_path, "rb") as f:
-            while True:
-                chunk = f.read(1 << 20)
-                if not chunk:
-                    break
-                read += len(chunk)
-                if read > TRANSCRIPT_MAX_BYTES:
-                    return None
-                count += chunk.count(b"\n")
-        return count
+        parent = Path(transcript)
+        candidate = parent.parent / parent.stem / "subagents" / f"agent-{agent}.jsonl"
+        return str(candidate) if candidate.is_file() else None
     except OSError:
         return None
 
 
 # =============================================================================
-# State (append-only JSONL, sharded per pid, user-global)
+# State (one append-only JSONL file per identity, locked, user-global)
 # =============================================================================
 
 
@@ -395,8 +415,12 @@ def _project_id(root: Path) -> str:
 
 
 def _maybe_gc(base_dir: Path) -> None:
-    """Prune shards older than 48 h, at most once per hour. Best-effort,
-    event-independent, errors ignored."""
+    """Prune conforming shards older than 48 h, at most once per hour.
+
+    Scope is exact-depth (``<base>/<project16>/<shard>.jsonl``) and name-gated;
+    foreign files and directories are never touched. Best-effort, errors
+    ignored.
+    """
     try:
         marker = base_dir / GC_MARKER
         now = time.time()
@@ -411,149 +435,133 @@ def _maybe_gc(base_dir: Path) -> None:
             marker.touch()
         except OSError:
             return
-        for shard in base_dir.rglob("*.jsonl"):
+        try:
+            project_dirs = list(base_dir.iterdir())
+        except OSError:
+            return
+        for project_dir in project_dirs:
+            if not GC_PROJECT_DIR_RE.match(project_dir.name):
+                continue
             try:
-                if now - shard.stat().st_mtime > STATE_MAX_AGE_SECONDS:
-                    shard.unlink()
+                if not project_dir.is_dir():
+                    continue
+                shards = list(project_dir.iterdir())
             except OSError:
                 continue
+            for shard in shards:
+                if not GC_SHARD_NAME_RE.match(shard.name):
+                    continue
+                try:
+                    if not shard.is_file():
+                        continue
+                    if now - shard.stat().st_mtime > STATE_MAX_AGE_SECONDS:
+                        shard.unlink()
+                except OSError:
+                    continue
     except Exception:
         pass
 
 
-def load_state(base_dir: Path, project_id: str, identity: str) -> dict[str, dict]:
-    """Merge every ``<identity>.*.jsonl`` shard; newest record per spec wins
-    (``ts`` tiebreaker). Malformed lines are skipped silently. Fail-open to {}
-    (which drives injection rather than silence)."""
-    result: dict[str, dict] = {}
-    proj_dir = base_dir / project_id
-    try:
-        shards = list(proj_dir.glob(f"{identity}.*.jsonl"))
-    except OSError:
-        return result
-    for shard in shards:
-        try:
-            text = shard.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not isinstance(record, dict):
-                continue
-            spec = record.get("spec")
-            ts = record.get("ts")
-            if not isinstance(spec, str) or not isinstance(ts, (int, float)):
-                continue
-            previous = result.get(spec)
-            if previous is None or ts > previous.get("ts", float("-inf")):
-                result[spec] = record
-    return result
+def open_shard(shard_path: Path) -> int | None:
+    """Open (creating) the identity's shard for read+append.
 
-
-def make_record(rel_path: str, sha256_hex: str, mode: str, clock: dict, pid: int) -> dict:
-    return {
-        "v": STATE_VERSION,
-        "spec": rel_path,
-        "sha256": sha256_hex,
-        "mode": mode,
-        "ts": clock["ts"],
-        "lines": clock["lines"],
-        "pid": pid,
-    }
-
-
-def append_records(shard_path: Path, records: list[dict]) -> None:
-    """Append records as JSONL to the own-pid shard (O_APPEND). Best-effort —
-    a failure warns and proceeds (the emission already went out)."""
-    if not records:
-        return
+    Doubles as the writability probe: a failure here trips the circuit breaker
+    and the event runs stateless (ticket-only), which is bounded, instead of
+    re-emitting full specs on every event forever.
+    """
     try:
         shard_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
-        _warn(f"could not create state dir {shard_path.parent} — state not recorded")
-        return
+        _warn(f"state dir {shard_path.parent} unusable — running stateless")
+        return None
     try:
-        fd = os.open(
+        return os.open(
             str(shard_path),
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            os.O_RDWR | os.O_CREAT | os.O_APPEND,
             0o644,
         )
     except OSError:
-        _warn(f"could not open state shard {shard_path} — state not recorded")
+        _warn(f"state shard {shard_path} unusable — running stateless")
+        return None
+
+
+def lock_shard(fd: int) -> None:
+    """Best-effort exclusive lock held across read→decide→append.
+
+    Closes the duplicate-injection race between concurrent hook processes on
+    POSIX. No fcntl (Windows) or an unsupported filesystem → no lock; the
+    worst case is a duplicate injection, never a lost one.
+    """
+    try:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except Exception:
+        pass
+
+
+def unlock_shard(fd: int) -> None:
+    try:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
+def load_state(fd: int, state_version: int) -> dict[str, dict]:
+    """Read the shard through the already-open fd; newest record per spec wins
+    (``ts`` tiebreaker). Malformed lines and foreign schema versions are
+    skipped silently. Fail-open to {} (which drives injection, not silence)."""
+    result: dict[str, dict] = {}
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return result
+
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("v") != state_version:
+            continue
+        spec = record.get("spec")
+        ts = record.get("ts")
+        if not isinstance(spec, str) or not isinstance(ts, (int, float)):
+            continue
+        previous = result.get(spec)
+        if previous is None or ts > previous.get("ts", float("-inf")):
+            result[spec] = record
+    return result
+
+
+def append_records(fd: int, records: list[dict]) -> None:
+    """Append records as JSONL (O_APPEND). Best-effort — a failure warns and
+    proceeds (the emission already went out)."""
+    if not records:
         return
     try:
         blob = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
         os.write(fd, blob.encode("utf-8"))
     except OSError:
-        _warn(f"could not write state shard {shard_path} — state may be incomplete")
-    finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        _warn("could not write state shard — state may be incomplete")
 
 
 # =============================================================================
-# Decision engine
-# =============================================================================
-
-
-def _within_window(clock: dict, last: dict, win_lines: int, win_seconds: int) -> bool:
-    """True when the last emission is still inside the refresh window (→ stay
-    silent). Compare lines-to-lines when both present, else seconds-to-seconds;
-    truly incomparable → past-window (False → refresh, the over-inject side).
-    A window of ``0`` means never refresh (infinite window → always True).
-    A NEGATIVE delta means the clock went backwards — for the line clock that
-    is a transcript rewritten shorter (e.g. /compact), i.e. the earlier
-    injection was likely compacted away; for the wall clock, skew. Both are
-    treated as past-window per the over-inject asymmetry principle."""
-    cur_lines = clock.get("lines")
-    last_lines = last.get("lines")
-    if cur_lines is not None and isinstance(last_lines, (int, float)):
-        if win_lines == 0:
-            return True
-        delta = cur_lines - last_lines
-        return 0 <= delta < win_lines
-
-    cur_ts = clock.get("ts")
-    last_ts = last.get("ts")
-    if isinstance(cur_ts, (int, float)) and isinstance(last_ts, (int, float)):
-        if win_seconds == 0:
-            return True
-        delta = cur_ts - last_ts
-        return 0 <= delta < win_seconds
-
-    return False
-
-
-def decide(
-    stateless: bool,
-    last: dict | None,
-    sha256_hex: str,
-    clock: dict,
-    win_lines: int,
-    win_seconds: int,
-) -> str:
-    """Return one of "full" | "ticket" | "silent" for a single spec."""
-    if stateless:
-        return "ticket"
-    if last is None:
-        return "full"
-    if last.get("sha256") != sha256_hex:
-        return "full"
-    if _within_window(clock, last, win_lines, win_seconds):
-        return "silent"
-    return "ticket"
-
-
-# =============================================================================
-# Payload assembly
+# Entry
 # =============================================================================
 
 
@@ -568,144 +576,19 @@ def _repo_rel(root: Path, file_path: str) -> str:
         return str(file_path).replace("\\", "/")
 
 
-def _full_block(edited_rel: str, spec_rel: str, sha12: str, content: str) -> str:
-    return (
-        f'<spec-context file="{edited_rel}" spec="{spec_rel}" sha256="{sha12}">\n'
-        f"{content}\n"
-        f"</spec-context>"
-    )
-
-
-def _ticket_block(edited_rel: str, spec_rel: str, sha12: str) -> str:
-    return (
-        f'<spec-ticket file="{edited_rel}" spec="{spec_rel}" sha256="{sha12}">\n'
-        f"You were shown this spec earlier in this session and its content is unchanged.\n"
-        f"It still governs edits to matching files. If you no longer remember it, Read\n"
-        f"{spec_rel} before continuing.\n"
-        f"</spec-ticket>"
-    )
-
-
-def build_payload(
-    edited_rel: str,
-    matches: list,
-    stateless: bool,
-    state_records: dict[str, dict],
-    clock: dict,
-    pid: int,
-    max_spec_bytes: int,
-    max_total_bytes: int,
-    win_lines: int,
-    win_seconds: int,
-) -> tuple[str, list[dict]]:
-    """Assemble the additionalContext payload from the matched specs.
-
-    Returns (payload, records) where ``records`` are the state lines to append
-    for the emissions that actually made it into the payload (silent hits and
-    budget-dropped emissions record nothing — they stay eligible).
-    """
-    full_blocks: list[str] = []
-    index_lines: list[str] = []
-    ticket_pending: list[tuple[str, str]] = []  # (spec_rel, sha256_hex)
-    records: list[dict] = []
-    used = 0
-
-    for match in matches:
-        try:
-            data = match.spec_path.read_bytes()
-        except OSError:
-            _warn(f"cannot read {match.rel_path} — skipped")
-            continue
-
-        sha256_hex = hashlib.sha256(data).hexdigest()
-        sha12 = sha256_hex[:12]
-        last = None if stateless else state_records.get(match.rel_path)
-        decision = decide(stateless, last, sha256_hex, clock, win_lines, win_seconds)
-
-        if decision == "silent":
-            continue
-
-        if decision == "full":
-            truncated = truncate_utf8(data, max_spec_bytes)
-            content = truncated.decode("utf-8", errors="replace")
-            if len(truncated) < len(data):
-                content += _truncate_notice(match.rel_path, max_spec_bytes)
-            block = _full_block(edited_rel, match.rel_path, sha12, content)
-            block_size = len(block.encode("utf-8"))
-            if max_total_bytes > 0 and used + block_size > max_total_bytes:
-                # Budget exhausted — degrade to an index line, never drop
-                # silently. Not recorded: stays eligible for a later event.
-                description = match.description or "no description"
-                index_lines.append(f"- {match.rel_path} — {description}")
-                continue
-            used += block_size
-            full_blocks.append(block)
-            records.append(
-                make_record(match.rel_path, sha256_hex, "full", clock, pid)
-            )
-        else:  # "ticket" — deferred; counted against the budget last
-            ticket_pending.append((match.rel_path, sha256_hex))
-
-    blocks: list[str] = list(full_blocks)
-
-    if index_lines:
-        # The index block is budget-bounded too: lines that do not fit are
-        # collapsed into one summary line (count + how to list them via pull
-        # mode) so the additionalContext ceiling is honored without silently
-        # dropping any governing spec.
-        chosen: list[str] = []
-        dropped = 0
-        if max_total_bytes > 0:
-            for line in index_lines:
-                candidate = (
-                    "<spec-index>\n" + "\n".join([*chosen, line]) + "\n</spec-index>"
-                )
-                if used + len(candidate.encode("utf-8")) > max_total_bytes:
-                    dropped += 1
-                    continue
-                chosen.append(line)
-            if dropped:
-                chosen.append(
-                    f"- (+{dropped} more governing specs over budget — run "
-                    f"get_context.py --mode spec --file {edited_rel} to list them)"
-                )
-        else:
-            chosen = index_lines
-        index_block = "<spec-index>\n" + "\n".join(chosen) + "\n</spec-index>"
-        blocks.append(index_block)
-        used += len(index_block.encode("utf-8"))
-
-    for spec_rel, sha256_hex in ticket_pending:
-        ticket = _ticket_block(edited_rel, spec_rel, sha256_hex[:12])
-        ticket_size = len(ticket.encode("utf-8"))
-        if max_total_bytes > 0 and used + ticket_size > max_total_bytes:
-            _warn(f"ticket for {spec_rel} dropped — per-event budget exhausted")
-            continue
-        used += ticket_size
-        blocks.append(ticket)
-        records.append(make_record(spec_rel, sha256_hex, "ticket", clock, pid))
-
-    return "\n\n".join(blocks), records
-
-
-# =============================================================================
-# Entry
-# =============================================================================
-
-
 def main() -> int:
     if os.environ.get("TRELLIS_HOOKS") == "0" or os.environ.get("TRELLIS_DISABLE_HOOKS") == "1":
         return 0
 
     try:
         input_data = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
         return 0
     if not isinstance(input_data, dict):
         return 0
 
     tool_name = input_data.get("tool_name", "") or input_data.get("toolName", "")
-    if tool_name not in EDIT_TOOLS:
+    if not isinstance(tool_name, str) or not tool_name:
         return 0
 
     tool_input = input_data.get("tool_input", {})
@@ -726,21 +609,25 @@ def main() -> int:
 
     (
         enabled,
-        max_spec_bytes,
-        max_total_bytes,
-        win_lines,
+        max_spec_chars,
+        max_total_chars,
+        win_turns,
         win_seconds,
+        tools,
     ) = get_spec_injection_settings(root)
-    if not enabled:
+    if not enabled or tool_name not in tools:
         return 0
 
-    scripts_dir = root / DIR_WORKFLOW / "scripts"
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
+    _scripts_dir_on_path(root)
     try:
         from common.spec_match import match_specs_for_file  # type: ignore[import-not-found]
+        from common.spec_inject import (  # type: ignore[import-not-found]
+            STATE_VERSION,
+            assemble_payload,
+            scan_transcript,
+        )
     except Exception:
-        return 0  # matching engine unavailable — degrade to nothing
+        return 0  # matching/decision engine unavailable — degrade to nothing
 
     matches = match_specs_for_file(root, file_path)
     if not matches:
@@ -749,38 +636,49 @@ def main() -> int:
     identity, stateless = resolve_identity(root, input_data)
 
     state_records: dict[str, dict] = {}
-    shard_path: Path | None = None
-    clock = {"lines": None, "ts": time.time()}
+    clock = {"turns": None, "boundaries": None, "ts": time.time()}
+    fd: int | None = None
 
     if not stateless:
         base_dir = _state_base_dir()
         _maybe_gc(base_dir)
-        project_id = _project_id(root)
-        state_records = load_state(base_dir, project_id, identity)
-        pid = os.getpid()
-        shard_path = base_dir / project_id / f"{identity}.{pid}.jsonl"
-        transcript = input_data.get("transcript_path")
-        lines = _transcript_line_count(transcript if isinstance(transcript, str) else None)
-        clock = {"lines": lines or None, "ts": time.time()}
-    else:
-        pid = os.getpid()
+        shard_path = base_dir / _project_id(root) / f"{identity}.jsonl"
+        fd = open_shard(shard_path)
+        if fd is None:
+            # Circuit breaker: unwritable state → ticket-only for this event.
+            stateless = True
+        else:
+            lock_shard(fd)
+            state_records = load_state(fd, STATE_VERSION)
+            counts = scan_transcript(clock_transcript_path(input_data))
+            clock = {
+                "turns": counts["turns"] if counts else None,
+                "boundaries": counts["boundaries"] if counts else None,
+                "ts": time.time(),
+            }
 
     edited_rel = _repo_rel(root, file_path)
-    payload, records = build_payload(
-        edited_rel,
-        matches,
-        stateless,
-        state_records,
-        clock,
-        pid,
-        max_spec_bytes,
-        max_total_bytes,
-        win_lines,
-        win_seconds,
-    )
-
-    if not stateless and shard_path is not None and records:
-        append_records(shard_path, records)
+    try:
+        payload, records = assemble_payload(
+            edited_rel,
+            matches,
+            stateless,
+            state_records,
+            clock,
+            max_spec_chars,
+            max_total_chars,
+            win_turns,
+            win_seconds,
+        )
+        if fd is not None and records:
+            append_records(fd, records)
+    finally:
+        if fd is not None:
+            unlock_shard(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     if not payload:
         return 0

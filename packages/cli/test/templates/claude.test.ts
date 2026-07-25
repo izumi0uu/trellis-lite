@@ -77,12 +77,11 @@ describe("settingsTemplate PostToolUse matchers", () => {
     hooks: { type: string; command: string; timeout: number }[];
   }[];
 
-  it("includes Read, Edit, Write, and MultiEdit matchers", () => {
-    const matchers = postToolUseEntries.map((e) => e.matcher);
-    expect(matchers).toContain("Read");
-    expect(matchers).toContain("Edit");
-    expect(matchers).toContain("Write");
-    expect(matchers).toContain("MultiEdit");
+  // R6: ONE entry with a pipe-list matcher (Claude Code's documented
+  // list-of-exact-strings semantics), not four separate matcher entries.
+  it("is a single entry matching Read|Edit|Write|MultiEdit", () => {
+    expect(postToolUseEntries).toHaveLength(1);
+    expect(postToolUseEntries[0].matcher).toBe("Read|Edit|Write|MultiEdit");
   });
 
   it("all PostToolUse entries invoke inject-spec-context.py with timeout 15", () => {

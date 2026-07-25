@@ -225,3 +225,157 @@ claude settings template + live mirror: PostToolUse matchers gain "Read"
 Kernel ABI / forwarding shells / behavior registry / config.resolved.json /
 heartbeat / doctor / interpreter baking — P-1..P4 territory, separate efforts.
 Tier-3 ppid identity: reserved, unwired (rationale in PRD v2 §2).
+
+---
+
+# Review revision (2026-07-25) — taosu's PR #468 review, evidence-frozen contract
+
+Every item below maps to taosu's review comments verbatim. Facts re-verified on
+this machine before freezing (real transcripts under ~/.claude/projects: 28
+lines/real-turn on a local sample vs his 124 — both confirm lines≫turns; compact
+appends `compact_boundary` and files never shrink — 2 local samples; subagent
+transcripts exist at `<parent-uuid>/subagents/agent-<id>.jsonl` — 57 local
+files). Claude Code docs re-fetched 2026-07-25: matcher `"Edit|Write"` pipe
+lists are official (PostToolUse example verbatim), and ALL hook output strings
+including additionalContext cap at 10,000 characters.
+
+## R1. Budget in characters (review §1)
+
+- Config keys renamed: `max_spec_chars` (default **9400**) / `max_total_chars`
+  (default **9500**). Rationale: ceiling is 10,000 **characters** (platform's
+  own unit — bytes made CJK pay 3×); 9500 leaves headroom; 9400 leaves wrapper
+  room so taosu's 9,353-char CJK example injects **whole**. `0` = unlimited.
+- Hard ceiling: budget checked on the **assembled payload string** (wrappers,
+  `\n\n` separators, `<spec-index>` block, `(+N more)` summary, tickets — all
+  counted). Nothing is appended unchecked (fixes review §7 "budget accounting
+  misses two things").
+- Truncation is by code points (`body[:max_spec_chars]` + notice) — character
+  slicing cannot split a multi-byte sequence; byte-level truncate_utf8 is no
+  longer needed in THIS hook.
+
+## R2. Clock = real turns + compact boundaries (review §2, §3)
+
+- `refresh_window_lines` → **`refresh_window_turns`** (default **30**, the
+  originally-intended "30 turns of breathing room"). `refresh_window_seconds`
+  2700 unchanged (fallback when no transcript).
+- A **turn** = transcript line with `type=="user"` AND `message.content` is a
+  string AND no `isMeta` (taosu's rule, verified locally).
+- A **compact boundary** = line with `type=="system"`,
+  `subtype=="compact_boundary"`. Transcripts are append-only (verified) — the
+  negative-delta-as-compact guard was built on a false assumption and is
+  DEMOTED to a plain clock-anomaly guard (still past-window, safe direction);
+  docs/tests must stop claiming it detects /compact.
+- decide() gains a boundary rule, placed BEFORE the window check:
+  `boundaries_now > last.boundaries (both known) → FULL` — after compaction the
+  text is genuinely gone; "a ticket would be wrong here" (review comment 2).
+- Scan is single-pass with substring prefilter before json.loads; 64 MiB cap
+  falls back to wall clock (unchanged).
+
+## R3. Subagent clock (review §4)
+
+- When `agent_id` is present, the clock reads the SUBAGENT's own transcript,
+  derived: `<transcript dir>/<parent stem>/subagents/agent-<agent_id>.jsonl`
+  (convention verified, 57 files locally). If that file is absent → wall
+  clock — NEVER the parent's line/turn count (parent idles while the subagent
+  runs; measuring it under-injects, the unacceptable direction).
+- Identity/state separation via `+a-<agent_id>` suffix unchanged.
+
+## R4. State: one file per session, no pid shards, locked (review §5)
+
+- Shard path becomes `<base>/<project16>/<identity>.jsonl` — **no pid**.
+  Fresh-process-per-hook made pid shards one-file-per-emission with
+  O(session) glob+merge on every event; O_APPEND short-line appends are safe
+  (taosu measured 12×38KB concurrent, zero corruption).
+- Records: `{v:2, spec, sha256, mode, ts, turns, boundaries}`; `v != 2`
+  records ignored (safe direction: re-inject).
+- Best-effort `fcntl.flock` held across read→decide→append closes the
+  duplicate-injection race on POSIX; on platforms without fcntl → no lock,
+  fail-open (documented).
+
+## R5. Fail-closed gaps (review §6)
+
+- **Circuit breaker**: state dir/file unwritable (probe at resolve time) →
+  the event runs in stateless ticket-only mode (no reads, no writes, no FULL
+  re-emission loop). Reproduces review's "8,986 bytes three runs in a row" →
+  now three tickets.
+- **GC scope**: no rglob. Exactly `base/<16-hex-project>/<name>.jsonl` where
+  name matches `^[A-Za-z0-9_-]+(\.[0-9]+)?\.jsonl$` (second alternative covers
+  our own legacy pid shards), mtime > 48h, hourly `.last-gc` gate. Foreign
+  files/dirs are never touched even via a hostile TRELLIS_SPEC_STATE_DIR.
+
+## R6. Robustness smalls (review §7)
+
+- **Glob validation** flips whitelist→blacklist: reject only empty / leading
+  `/` / `..` segment / `\` / control chars. `@scope`, `[slug]`,
+  `(marketing)`, non-ASCII dirs now valid (translation already escapes
+  literals char-by-char).
+- **Stateless ticket wording**: stateless (and circuit-breaker) tickets use a
+  body that does NOT claim prior exposure: "This spec governs the file you
+  just touched. If you have not read it in this session, Read <path> before
+  continuing." Stateful past-window ticket text unchanged.
+- **Frontmatter tolerance**: unknown line shapes are ignored; block scalars
+  (`key: >` / `key: |`) consume their indented continuation; stray `- item`
+  ignored. Only a malformed `paths:` itself (inline scalar) still warns+skips
+  the file. A SKILL.md-style `description: >` no longer kills the spec.
+- **Windows stdin**: reconfigure stdin alongside stdout (per this repo's own
+  script-conventions "Windows stdio Encoding").
+- **settings.json**: ONE PostToolUse entry, matcher `"Read|Edit|Write|MultiEdit"`
+  (official docs list-of-exact-strings semantics). New optional config
+  `spec_injection.tools` (list, default those four) filters in-hook so users
+  can e.g. drop Read.
+
+## R7. Structure (review "On structure")
+
+- Pure logic extracted to **`common/spec_inject.py`** (registered in
+  templates/trellis/index.ts + live mirrors): scan_transcript, decide,
+  within_window, truncate_chars, render_full/render_ticket, assemble_payload,
+  record helpers. Hook keeps IO/orchestration only. Unit tests import the
+  module directly (runSpecProbe pattern).
+- read+hash before decide is KEPT deliberately: sha-change-beats-window
+  requires knowing current content; a stat shortcut would weaken that
+  contract. Recorded here as an accepted trade-off, not an oversight.
+
+## R8. Back-port (review "Pre-existing bug")
+
+- The truncate_utf8 boundary fix (complete trailing sequence kept whole) is
+  back-ported to inject-subagent-context.py template + live twins, with
+  taosu's exact repro cases as regression tests ("你好世界" cap 6 → "你好").
+
+## Explicitly NOT in this revision (with review's own words)
+
+- Transcript-as-state full rewrite: "orthogonal … you may well have considered
+  and rejected it"; comment 3 confirms the standalone findings above hold
+  regardless. Tracked as the likely next-iteration direction.
+- Rules-section spec authoring: "treat it as a separate question".
+- settings.json structured merge for existing users: requires the hooks-merge
+  capability (a separate PR per the architecture doc); acknowledged in review
+  reply as a known follow-up.
+- Cross-platform provider contract: moved by taosu to discussion #474.
+
+## Contract amendments (post-validation, same day)
+
+Stage V1's hermetic validation surfaced four defects IN THE FROZEN CONTRACT
+ITSELF (implemented as written, reported instead of improvised — see the run
+report). Amendments, each with the measured evidence that forced it:
+
+1. **R1 amendment — derived truncation cap.** As frozen, truncated-body (9400)
+   + notice (~114) + wrapper (~148) > 9500, so any spec over ~9,240 chars
+   degraded to an index line — the truncation path was unreachable (measured:
+   30,000-char fixture → 66-char index-only payload; live commands-update.md
+   34,985 chars → index-only, WORSE than pre-review). Amended rule: a FULL
+   that cannot fit whole is truncated to the LARGEST body prefix that still
+   fits the remaining total budget (wrapper + notice counted, join-accurate);
+   `max_spec_chars` remains an upper bound. Defaults stay 9400/9500.
+2. **R5 amendment — GC name class gains `+`.** The frozen regex could not
+   match `+a-<agent_id>` subagent shards (R3's own suffix), so they were never
+   pruned. New pattern: `^[A-Za-z0-9_+-]+(\.[0-9]+)?\.jsonl$`.
+3. **R1 amendment — summary must be reachable.** Greedy index packing left
+   less slack than one summary line (~103 chars), so "(+N more)" almost never
+   appeared and over-budget specs vanished with only a stderr warn. Amended:
+   when the summary does not fit, pop already-chosen index lines (re-counting
+   them as dropped) until it fits; only an absurdly small total budget can
+   drop the summary (stderr warn stays).
+4. **R2 amendment — prefilter tolerates both JSON spacings.** The byte
+   prefilter now matches `"type":"user"` AND `"type": "user"` (same for the
+   boundary subtype), removing the silent zero-turn failure mode against
+   producers that emit a space after the colon.
