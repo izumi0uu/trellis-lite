@@ -31,14 +31,17 @@ a short reminder pointing back at the spec. Both append a state record; silent
 hits do not (fixed window, not sliding — continuous editing is exactly when
 drift is worst).
 
-Identity ladder (misfire asymmetry: a collision that MISSES an injection is
-unacceptable; drift that OVER-injects is fine):
-  T1  session_id | conversation_id | sessionID (+ agent_id when present, so a
-      subagent never shares state with its parent).
-  T2  transcript_path (hashed).
-  T4  none of the above, or an unwritable state dir → stateless: no state IO
-      at all, every hit is a TICKET (circuit breaker — never a FULL re-emission
-      loop).
+Identity (misfire asymmetry: a collision that MISSES an injection is
+unacceptable; drift that OVER-injects is fine): the session/window key is
+delegated to common.active_task.resolve_context_key — the shared resolver
+every other hook uses — called payload-first, environment-inclusive second,
+so two live sessions can never collapse onto one exported env value. A
+`+a-<agent_id>` suffix (appended after each part is sanitized) keeps a
+subagent's state separate from its parent's. When the resolver is unavailable
+(older installed scripts tree), a minimal payload-only ladder (session keys,
+then transcript hash) keeps the hook working. No key from any source, or an
+unwritable state dir → stateless: no state IO at all, every hit is a TICKET
+(circuit breaker — never a FULL re-emission loop).
 
 State: user-global, out of the repo, one append-only JSONL file per identity
 under ${TRELLIS_SPEC_STATE_DIR:-~/.trellis/spec-inject}/<project16>/<identity>.jsonl.
@@ -47,9 +50,12 @@ unavailable (Windows) the short O_APPEND writes stay atomic enough and the
 worst case is a duplicate injection. All state IO degrades toward emitting.
 A once-per-hour GC prunes conforming shards older than 48 h.
 
-Clock: real user turns (and /compact boundaries) counted from the transcript —
-the subagent's own transcript when the event carries an agent_id, never the
-parent's. No readable transcript → wall clock.
+Clock: conversation beats (and /compact boundaries) counted from the agent's
+own transcript — the subagent's own file when the event carries an agent_id,
+never the parent's. A beat is a real user turn in a main transcript and an
+assistant message in a subagent transcript (a subagent's user turns are frozen
+at 1 forever, so they cannot measure anything). No readable transcript → wall
+clock.
 
 Budget (config.yaml `spec_injection:`): per-spec cap `max_spec_chars`
 (default 9400) with code-point truncation + in-body notice; per-event cap
@@ -60,9 +66,10 @@ are counted last and dropped (with a stderr warning) only if even they do not
 fit.
 
 Refresh windows (config.yaml `spec_injection:`): `refresh_window_turns`
-(default 30; real user turns) and `refresh_window_seconds` (default 2700;
-wall-clock fallback). Either `0` = never refresh in that clock mode (both `0`
-reproduces the legacy inject-once behavior).
+(default 30; beats of the agent's own transcript) and
+`refresh_window_seconds` (default 2700; wall-clock fallback). Either `0` =
+never refresh in that clock mode (both `0` reproduces the legacy inject-once
+behavior).
 
 Never blocks, never crashes: non-matching events, missing file_path, no
 matches, any internal error → exit 0 with no stdout (stderr warnings allowed).
@@ -83,11 +90,11 @@ from pathlib import Path
 
 # IMPORTANT: Force UTF-8 on Windows for the streams this hook uses.
 # stdin carries the payload (non-ASCII file paths), stdout carries the spec
-# bodies; without this the default ANSI codepage raises UnicodeDecodeError /
-# UnicodeEncodeError.
+# bodies, stderr carries warnings that quote both; without this the default
+# ANSI codepage raises UnicodeDecodeError / UnicodeEncodeError.
 if sys.platform.startswith("win"):
     import io as _io
-    for _stream_name in ("stdin", "stdout"):
+    for _stream_name in ("stdin", "stdout", "stderr"):
         _stream = getattr(sys, _stream_name, None)
         if _stream is None:
             continue
@@ -116,9 +123,10 @@ DIR_SPEC = "spec"
 DEFAULT_EDIT_TOOLS = ("Read", "Edit", "Write", "MultiEdit")
 
 # Budget defaults sized against Claude Code's documented 10,000-CHARACTER
-# additionalContext ceiling — stay under with margin, and leave the per-spec
-# cap enough wrapper room that a spec at the cap still lands whole.
-# `0` = unlimited.
+# additionalContext ceiling — stay under with margin. The <spec-context>
+# wrapper (~152 chars with typical rel paths) counts against the total, so a
+# spec lands whole only up to ~9348 chars; at the per-spec cap the block is
+# derived-truncated further to fit the event ceiling. `0` = unlimited.
 DEFAULT_MAX_SPEC_CHARS = 9400
 DEFAULT_MAX_TOTAL_CHARS = 9500
 
@@ -148,6 +156,12 @@ AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 def _warn(message: str) -> None:
     print(f"[inject-spec-context] WARN: {message}", file=sys.stderr)
+
+
+def _agent_id(payload: dict) -> str:
+    """The subagent id carried by the event, or "" for a main-session event."""
+    raw = payload.get("agent_id")
+    return raw.strip() if isinstance(raw, str) else ""
 
 
 def find_trellis_root(start: Path) -> Path | None:
@@ -192,6 +206,25 @@ def _read_trellis_config(root: Path) -> dict:
         return {}
 
 
+def _parse_tools(raw: object) -> tuple[str, ...] | None:
+    """Parse `spec_injection.tools` into a tuple of tool names.
+
+    Two grammars, because the bundled YAML reader hands the value over in two
+    shapes: a block list (``- Edit`` items) arrives as a list, a flow sequence
+    (``tools: [Edit, Write]``) arrives as the raw string. ``[]`` in either
+    shape is a deliberate "never trigger" and is respected. Returns None for a
+    value that is neither (the caller warns and keeps the defaults).
+    """
+    if isinstance(raw, list):
+        return tuple(t.strip() for t in raw if isinstance(t, str) and t.strip())
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("[") and text.endswith("]"):
+            items = (part.strip().strip("\"'").strip() for part in text[1:-1].split(","))
+            return tuple(item for item in items if item)
+    return None
+
+
 def get_spec_injection_settings(
     root: Path,
 ) -> tuple[bool, int, int, int, int, tuple[str, ...]]:
@@ -213,8 +246,11 @@ def get_spec_injection_settings(
             - MultiEdit
 
     Missing keys use their defaults; ``0`` disables the corresponding limit
-    (character caps) or refresh (window keys). Invalid values fall back to the
-    default for that key with a stderr warning.
+    (``max_spec_chars: 0`` = inline the whole body, ``max_total_chars: 0`` =
+    no per-event ceiling) or refresh (window keys). ``tools`` also accepts a
+    flow sequence (``tools: [Edit, Write]``), and ``tools: []`` disables every
+    trigger. Invalid values fall back to the default for that key with a
+    stderr warning; tool names outside the known set warn once.
     """
     enabled = True
     tools = DEFAULT_EDIT_TOOLS
@@ -241,6 +277,9 @@ def get_spec_injection_settings(
                     f"using true (default)"
                 )
 
+        # int() coercion stays local to this hook by decision (audit round,
+        # 2026-07-25): widening the shared common/config.py helpers has more
+        # blast radius than this small duplication costs.
         for key, default_value in list(numbers.items()):
             if key not in section:
                 continue
@@ -258,17 +297,21 @@ def get_spec_injection_settings(
             numbers[key] = value
 
         if "tools" in section:
-            raw_tools = section["tools"]
-            if isinstance(raw_tools, list):
-                # An empty list is a deliberate "never trigger" — respected.
-                tools = tuple(
-                    t.strip() for t in raw_tools if isinstance(t, str) and t.strip()
-                )
-            else:
+            parsed_tools = _parse_tools(section["tools"])
+            if parsed_tools is None:
                 _warn(
-                    f"invalid spec_injection.tools value: {raw_tools!r}; "
+                    f"invalid spec_injection.tools value: {section['tools']!r}; "
                     f"using default {list(DEFAULT_EDIT_TOOLS)}"
                 )
+            else:
+                tools = parsed_tools
+                unknown = [t for t in tools if t not in DEFAULT_EDIT_TOOLS]
+                if unknown:
+                    _warn(
+                        f"unknown spec_injection.tools entries {unknown} — "
+                        f"they will never match; known tools: "
+                        f"{list(DEFAULT_EDIT_TOOLS)}"
+                    )
 
     return (
         enabled,
@@ -286,17 +329,23 @@ def get_spec_injection_settings(
 
 
 def _sanitize(raw: str) -> str:
-    """Collapse a session/agent id into a filename-safe token.
+    """Map a session/agent id to a filename-safe, collision-free token.
 
-    Restricts to ``[A-Za-z0-9_-]``. Degenerate inputs (all-special) fall back
-    to a hash so distinct sessions never share an identity (collision → missed
-    injection is the unacceptable failure).
+    A readable head (the first 80 characters, every character outside
+    ``[A-Za-z0-9_-]`` replaced one-for-one by ``-``) plus, whenever anything
+    was replaced or the id was longer than 80 characters, ``-`` and 8 hex of
+    sha256(raw). The suffix is what makes the mapping injective: without it,
+    "a/b" and "a:b" — or two ids sharing an 80-character prefix — would fold
+    onto one state file, and a collision that MISSES an injection is the
+    unacceptable failure. Output stays inside the GC name class.
     """
     raw = raw.strip()
-    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", raw).strip("_-")
-    if not safe:
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-    return safe[:120]
+    head = raw[:80]
+    safe = re.sub(r"[^A-Za-z0-9_-]", "-", head)
+    if safe != head or len(raw) > 80:
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+        return f"{safe}-{digest}"
+    return safe
 
 
 def _shared_context_key(root: Path, payload: dict) -> str | None:
@@ -357,10 +406,11 @@ def resolve_identity(root: Path, payload: dict) -> tuple[str, bool]:
         return "", True
 
     identity = _sanitize(key)
-    agent = payload.get("agent_id")
-    if isinstance(agent, str) and agent.strip():
+    agent = _agent_id(payload)
+    if agent:
         # Parent and subagent do NOT share context — keep state separate.
-        # _sanitize strips "+", so this suffix cannot be forged by an id value.
+        # The suffix is appended AFTER each part is sanitized, and _sanitize
+        # maps "+" to "-", so no id value can forge the separator.
         identity += "+a-" + _sanitize(agent)
     return identity, False
 
@@ -383,8 +433,7 @@ def clock_transcript_path(payload: dict) -> str | None:
     raw = payload.get("transcript_path")
     transcript = raw.strip() if isinstance(raw, str) else ""
 
-    raw_agent = payload.get("agent_id")
-    agent = raw_agent.strip() if isinstance(raw_agent, str) else ""
+    agent = _agent_id(payload)
     if not agent:
         return transcript or None
 
@@ -418,10 +467,14 @@ def _maybe_gc(base_dir: Path) -> None:
     """Prune conforming shards older than 48 h, at most once per hour.
 
     Scope is exact-depth (``<base>/<project16>/<shard>.jsonl``) and name-gated;
-    foreign files and directories are never touched. Best-effort, errors
-    ignored.
+    foreign files and directories are never touched. Containment is enforced
+    against symlinks on both levels — a symlinked project dir or shard is
+    skipped outright, and every unlink candidate must still be under the
+    resolved base after realpath — so a planted link cannot walk this GC out
+    of its own tree. Best-effort, errors ignored.
     """
     try:
+        base_real = os.path.realpath(str(base_dir))
         marker = base_dir / GC_MARKER
         now = time.time()
         try:
@@ -443,7 +496,7 @@ def _maybe_gc(base_dir: Path) -> None:
             if not GC_PROJECT_DIR_RE.match(project_dir.name):
                 continue
             try:
-                if not project_dir.is_dir():
+                if project_dir.is_symlink() or not project_dir.is_dir():
                     continue
                 shards = list(project_dir.iterdir())
             except OSError:
@@ -452,7 +505,10 @@ def _maybe_gc(base_dir: Path) -> None:
                 if not GC_SHARD_NAME_RE.match(shard.name):
                     continue
                 try:
-                    if not shard.is_file():
+                    if shard.is_symlink() or not shard.is_file():
+                        continue
+                    shard_real = os.path.realpath(str(shard))
+                    if not shard_real.startswith(base_real + os.sep):
                         continue
                     if now - shard.stat().st_mtime > STATE_MAX_AGE_SECONDS:
                         shard.unlink()
@@ -511,8 +567,10 @@ def unlock_shard(fd: int) -> None:
 
 def load_state(fd: int, state_version: int) -> dict[str, dict]:
     """Read the shard through the already-open fd; newest record per spec wins
-    (``ts`` tiebreaker). Malformed lines and foreign schema versions are
-    skipped silently. Fail-open to {} (which drives injection, not silence)."""
+    (``ts`` decides, and on an exact tie the later line in the file does —
+    appends are ordered, and two records one float apart must not resolve to
+    the older one). Malformed lines and foreign schema versions are skipped
+    silently. Fail-open to {} (which drives injection, not silence)."""
     result: dict[str, dict] = {}
     try:
         os.lseek(fd, 0, os.SEEK_SET)
@@ -543,7 +601,7 @@ def load_state(fd: int, state_version: int) -> dict[str, dict]:
         if not isinstance(spec, str) or not isinstance(ts, (int, float)):
             continue
         previous = result.get(spec)
-        if previous is None or ts > previous.get("ts", float("-inf")):
+        if previous is None or ts >= previous.get("ts", float("-inf")):
             result[spec] = record
     return result
 
@@ -565,17 +623,6 @@ def append_records(fd: int, records: list[dict]) -> None:
 # =============================================================================
 
 
-def _repo_rel(root: Path, file_path: str) -> str:
-    """Repo-relative POSIX display path; falls back to the raw path."""
-    try:
-        p = Path(file_path)
-        if not p.is_absolute():
-            p = root / p
-        return p.resolve().relative_to(root.resolve()).as_posix()
-    except Exception:
-        return str(file_path).replace("\\", "/")
-
-
 def main() -> int:
     if os.environ.get("TRELLIS_HOOKS") == "0" or os.environ.get("TRELLIS_DISABLE_HOOKS") == "1":
         return 0
@@ -591,7 +638,11 @@ def main() -> int:
     if not isinstance(tool_name, str) or not tool_name:
         return 0
 
-    tool_input = input_data.get("tool_input", {})
+    # snake_case is Claude Code's shape; camelCase keeps parity with the
+    # sibling hooks that already accept both (other platforms emit toolInput).
+    tool_input = input_data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = input_data.get("toolInput")
     if not isinstance(tool_input, dict):
         return 0
     file_path = tool_input.get("file_path")
@@ -615,16 +666,21 @@ def main() -> int:
         win_seconds,
         tools,
     ) = get_spec_injection_settings(root)
-    if not enabled or tool_name not in tools:
+    # An empty `tools` list is the documented "disable every trigger" switch.
+    if not enabled or not tools or tool_name not in tools:
         return 0
 
     _scripts_dir_on_path(root)
     try:
-        from common.spec_match import match_specs_for_file  # type: ignore[import-not-found]
+        from common.spec_match import (  # type: ignore[import-not-found]
+            match_specs_for_file,
+            normalize_repo_relative,
+        )
         from common.spec_inject import (  # type: ignore[import-not-found]
             STATE_VERSION,
             assemble_payload,
             scan_transcript,
+            select_beats,
         )
     except Exception:
         return 0  # matching/decision engine unavailable — degrade to nothing
@@ -652,12 +708,17 @@ def main() -> int:
             state_records = load_state(fd, STATE_VERSION)
             counts = scan_transcript(clock_transcript_path(input_data))
             clock = {
-                "turns": counts["turns"] if counts else None,
+                # Beats of THIS agent's transcript: assistant messages for a
+                # subagent (its user turns are frozen at 1), real user turns
+                # for a main session.
+                "turns": select_beats(counts, bool(_agent_id(input_data))),
                 "boundaries": counts["boundaries"] if counts else None,
                 "ts": time.time(),
             }
 
-    edited_rel = _repo_rel(root, file_path)
+    edited_rel = normalize_repo_relative(root, file_path) or str(file_path).replace(
+        "\\", "/"
+    )
     try:
         payload, records = assemble_payload(
             edited_rel,

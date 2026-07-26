@@ -379,3 +379,121 @@ report). Amendments, each with the measured evidence that forced it:
    prefilter now matches `"type":"user"` AND `"type": "user"` (same for the
    boundary subtype), removing the silent zero-turn failure mode against
    producers that emit a space after the colon.
+
+---
+
+# Audit fix round (2026-07-25) — frozen contract F1-F20
+
+Input: the 32-confirmed / 5-partial adversarial audit (41 agents, every finding
+reproduced). Decisions below are final for this round; agents implement
+verbatim and report contract defects instead of improvising.
+
+## F1 (HIGH) Subagent clock beats
+Main transcripts tick on real user turns (unchanged). Subagent transcripts
+(agent_id present) tick on **assistant-message lines** (`type=="assistant"`,
+parsed not substring-guessed) — the agent-loop iteration is the conversation
+beat there; real user turns are structurally frozen at 1 (verified: 58/58 real
+subagent transcripts). scan_transcript returns
+{"turns", "assistant_turns", "boundaries"}; the hook selects beats =
+assistant_turns when agent_id is present, else turns. One window key
+(refresh_window_turns=30) — unit is "beats of that transcript". Docs define
+both beats explicitly.
+
+## F2 Identity: collision-free sanitization
+Replace truncate-and-collapse _sanitize: keep filesystem-safe head
+(re.sub [^A-Za-z0-9_-] -> "-", first 80 chars) and, WHENEVER any character was
+replaced OR length exceeded 80, append "-" + sha256(raw)[:8]. Distinct raw keys
+can no longer fold together. GC name regex unchanged (output stays in
+[A-Za-z0-9_+-]). The `+a-<agent_id>` suffix is appended AFTER sanitization of
+each part, preserving subagent separation.
+
+## F3 One normalization
+spec_match._normalize_repo_relative becomes the exported canonical
+(resolve(strict=False) both root and file to kill /tmp-vs-/private/tmp and
+symlink divergence; NFC-normalize; on darwin/win32 the glob regexes compile
+with re.IGNORECASE — case-insensitive filesystems, over-inject-safe). Hook
+deletes _repo_rel and imports the canonical. rel_path stored/displayed and
+rel used for matching are now the same string by construction.
+
+## F4 Frontmatter robustness
+- Flow sequences supported: `paths: [a, b]` splits on commas + unquotes each.
+- Head-read bound raised to 16 KiB / 200 lines; hitting the bound BEFORE the
+  closing `---` => warn + skip spec (never silently partial).
+- Opening `---` with NO recognized key before the closing marker => treated as
+  not-frontmatter (hr-opening prose files unaffected), no warning.
+
+## F5 Config surface honesty
+- tools accepts block lists, flow lists ("[Edit, Write]"), and "[]" == disable
+  all triggers (early exit). Unknown tool names warn once to stderr.
+- max_spec_chars: 0 == unlimited FULL body (fix _derive hi bound to len(text));
+  0 stays documented and tested.
+- MAX_SPEC_SOURCE_BYTES = 10 MiB: larger spec files degrade to index line with
+  a stderr warn (no unbounded read+hash).
+
+## F6 Budget: named-index reserve + honest tickets
+- Reserve while more candidates pend = actual per-candidate index-line sizes
+  (true strings, not estimates) + summary line, capped at 900 chars; if the cap
+  binds, fall back to summary-only reserve. §5 doc claim softened to match
+  (named lines guaranteed only within the cap).
+- Records gain optional "complete": false when a FULL was derived-truncated
+  below the whole body (absent == true). decide(): an incomplete last record
+  is re-taught as FULL when past window instead of a ticket — the stateful
+  ticket wording ("you were shown this spec") must never be a lie.
+- fits/fits_reserved merged into one closure.
+
+## F7 GC containment hardening
+Skip when project_dir or shard is a symlink; verify realpath(shard) stays
+under realpath(base). Keep name/depth gates.
+
+## F8 Fail-soft scan
+scan_transcript catches Exception (not just OSError) -> None (wall-clock
+degrade); the whole injection event must never abort because a transcript
+line was hostile.
+
+## F9 Platform-neutral input
+tool_input falls back to camelCase toolInput (sibling-hook parity). Windows
+stream reconfigure covers stderr too (six-hook parity).
+
+## F10 Duplication removals
+_unquote/_strip_inline_comment imported from .trellis_config (copies deleted);
+SpecCandidate Protocol deleted — spec_inject imports SpecMatch from
+.spec_match; load_state tie-break fixed to newest-wins on equal ts.
+
+## F11 Truthful docs & wording
+- _derive_fitting_full docstring rewritten (binary search).
+- Hook module docstring: delegation-era identity description.
+- spec-injection.md: beats definition, sanitization scheme, reserve rule,
+  complete-flag re-teach, GC symlink rule, bounds (16KiB/200), tools grammar,
+  corrected 9400/9500 arithmetic (wrapper ~152 chars, spec <= ~9348 lands
+  whole), purge pid-merge vocabulary, fix code-map claim about live config.
+- index.md Guidelines row rewritten for v2 reality; checklist row includes
+  common/spec_inject.py.
+- Summary line: dynamic plural + runnable command
+  ("python3 ./.trellis/scripts/get_context.py --mode spec --file <path>");
+  frozen-wording tests updated in lockstep.
+- The em-dash escape artifact in spec_match.py comment fixed.
+
+## F12 Pi TS coverage
+New test transpiles truncateUtf8 out of pi/extensions/trellis/index.ts.txt via
+the typescript devDep (transpileModule), runs taosu's repro cases + a cap
+sweep. Reverting the TS fix must turn the suite red.
+
+## F13 Five §12-required tests
+Implemented as written in the doc (or the doc line amended in the same commit
+when the case is genuinely untestable — each such amendment justified inline).
+
+## Accepted, documented, not changed
+- Config numeric-coercion helper stays local to the hook (changing shared
+  common/config.py has wider blast radius than the duplication costs) —
+  comment added citing this decision.
+- State-dir layout intentionally diverges from channel per-project buckets
+  (user-global by design, review-agreed) — doc note added.
+- Mixed-comparability compaction gap (wall-clock record then transcript event)
+  self-heals on the next transcript-based emission; documented as a bounded
+  known gap with the healing mechanism named.
+
+## Verification bar for this round (user-mandated)
+Real-state evidence required: shipped scanner run against REAL transcripts on
+this machine (main session, subagent, compacted) with sane counts asserted in
+the gate log; every fixed finding re-run through its original audit repro;
+full suite green; mirrors byte-identical.

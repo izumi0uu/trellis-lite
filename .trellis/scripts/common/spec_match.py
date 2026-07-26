@@ -15,18 +15,23 @@ frontmatter block declaring which repo paths they govern:
 
 The parser is hand-rolled (house pattern, modeled on
 ``trellis_config.parse_simple_yaml`` — no YAML dependency) and reads only a
-bounded head of each file (8 KiB / 100 lines, whichever ends first). Only
+bounded head of each file (16 KiB / 200 lines, whichever ends first). Only
 files whose first line is exactly ``---`` are considered. ``name:`` /
 ``description:`` single-line strings are recognized (description is reused in
-index lines).
+index lines). ``paths:`` accepts both a block list (``- <glob>`` items) and a
+flow sequence (``paths: [a, b]``).
 
 The parser is deliberately tolerant — a spec is prose that happens to carry a
 routing hint, not a config file. Unknown keys, unrecognized line shapes and
 stray ``- item`` lines are ignored; block scalars (``key: >`` / ``key: |``)
 consume their more-indented continuation lines, so a SKILL.md-style
-``description: >`` paragraph does not disqualify the file. Only a malformed
-``paths:`` itself (a scalar where a list belongs) is an error: that key is the
-one thing the rest of the pipeline depends on.
+``description: >`` paragraph does not disqualify the file. An opening ``---``
+with no recognized key before the closing marker is not frontmatter at all
+(a Markdown horizontal rule opening the prose) and is ignored silently. Two
+things are errors, and both warn + skip the whole file rather than route on a
+half-read block: a malformed ``paths:`` (a scalar where a list belongs — that
+key is the one thing the rest of the pipeline depends on), and a frontmatter
+block that is still open when the head bound is reached.
 
 Glob grammar (repo-relative, POSIX separators):
 
@@ -62,29 +67,42 @@ Translation examples (glob → matches / non-matches):
         same as packages/cli/**
 
 Provides:
-    SpecMatch              - frozen match record (spec_path, rel_path, description)
-    match_specs_for_file   - map an edited file to the specs that govern it
-    parse_spec_frontmatter - parse the optional frontmatter head block
-    glob_to_regex          - deterministic glob → compiled regex translation
+    SpecMatch               - frozen match record (spec_path, rel_path, description)
+    match_specs_for_file    - map an edited file to the specs that govern it
+    normalize_repo_relative - the canonical repo-relative path normalization
+    parse_spec_frontmatter  - parse the optional frontmatter head block
+    glob_to_regex           - deterministic glob → compiled regex translation
 """
 
 from __future__ import annotations
 
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
 from .paths import DIR_SPEC, DIR_WORKFLOW
+from .trellis_config import _strip_inline_comment, _unquote
 
 # Bounded head-read limits for frontmatter scanning (design contract).
-HEAD_MAX_BYTES = 8192
-HEAD_MAX_LINES = 100
+HEAD_MAX_BYTES = 16384
+HEAD_MAX_LINES = 200
+
+# Recognized frontmatter keys. An opening `---` block that declares none of
+# them is prose under a horizontal rule, not frontmatter.
+_KNOWN_KEYS = ("paths", "name", "description")
 
 _GLOB_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(.*)$")
 # YAML block-scalar introducers; the value lives in the indented lines below.
 _BLOCK_SCALARS = ("|", ">", "|-", ">-", "|+", ">+")
+
+# macOS and Windows filesystems are case-insensitive: the very same file can
+# be handed to us in a case the glob author never wrote. Match case-insensitively
+# there — over-injecting a spec is the safe side of the asymmetry.
+_CASE_INSENSITIVE_FS = sys.platform == "darwin" or sys.platform.startswith("win")
+_GLOB_FLAGS = re.IGNORECASE if _CASE_INSENSITIVE_FS else 0
 
 
 @dataclass(frozen=True)
@@ -110,26 +128,15 @@ def _warn(message: str) -> None:
     print(f"[WARN] spec_match: {message}", file=sys.stderr)
 
 
-def _unquote(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-        return value[1:-1]
-    return value
+def _parse_flow_sequence(value: str) -> list[str]:
+    """Split a YAML flow sequence body (``[a, b]``) into unquoted items.
 
-
-def _strip_inline_comment(value: str) -> str:
-    """Strip ` # …` comments while preserving `#` inside quoted strings."""
-    in_quote: str | None = None
-    for idx, ch in enumerate(value):
-        if in_quote:
-            if ch == in_quote:
-                in_quote = None
-            continue
-        if ch in ('"', "'"):
-            in_quote = ch
-            continue
-        if ch == "#" and (idx == 0 or value[idx - 1].isspace()):
-            return value[:idx]
-    return value
+    Commas separate; each item is trimmed and unquoted. Empty items (a
+    trailing comma, ``[]``) collapse away.
+    """
+    inner = value[1:-1]
+    items = (_unquote(part.strip()).strip() for part in inner.split(","))
+    return [item for item in items if item]
 
 
 def _read_head(path: Path) -> str:
@@ -142,11 +149,15 @@ def _read_head(path: Path) -> str:
 def parse_spec_frontmatter(head_text: str) -> SpecFrontmatter | None:
     """Parse the optional frontmatter block from a spec file's head.
 
-    Returns None when the file has no frontmatter (first line is not ``---``).
-    Raises ValueError only on a malformed ``paths:`` key (a scalar where a list
-    belongs); every other line shape is tolerated and ignored. The scan ends at
-    the closing ``---`` or at the head-read bound (HEAD_MAX_LINES), whichever
-    comes first.
+    Returns None when the file has no frontmatter: either the first line is not
+    ``---``, or the block declares no recognized key before its closing marker
+    (a horizontal rule opening a prose file — silent, not an error).
+
+    Raises ValueError on a malformed ``paths:`` key (a scalar where a list
+    belongs) and on a block that is still open when the head bound
+    (HEAD_MAX_LINES / HEAD_MAX_BYTES) is reached — routing on a half-read
+    frontmatter would be worse than skipping the file loudly. Every other line
+    shape is tolerated and ignored.
     """
     lines = head_text.splitlines()[:HEAD_MAX_LINES]
     if not lines:
@@ -160,6 +171,8 @@ def parse_spec_frontmatter(head_text: str) -> SpecFrontmatter | None:
     description: str | None = None
     pending_key: str | None = None
     block_indent: int | None = None
+    saw_known_key = False
+    closed = False
 
     for line in lines[1:]:
         stripped = line.strip()
@@ -173,6 +186,7 @@ def parse_spec_frontmatter(head_text: str) -> SpecFrontmatter | None:
             block_indent = None
 
         if stripped == "---":
+            closed = True
             break
         if not stripped or stripped.startswith("#"):
             continue
@@ -186,9 +200,10 @@ def parse_spec_frontmatter(head_text: str) -> SpecFrontmatter | None:
 
         key_match = _KEY_RE.match(stripped)
         if key_match is None:
-            continue  # Unrecognized line shape \u2014 tolerated and ignored.
+            continue  # Unrecognized line shape — tolerated and ignored.
 
         key = key_match.group(1)
+        saw_known_key = saw_known_key or key in _KNOWN_KEYS
         raw_value = key_match.group(2).strip()
         if raw_value in _BLOCK_SCALARS:
             if key == "paths":
@@ -201,8 +216,10 @@ def parse_spec_frontmatter(head_text: str) -> SpecFrontmatter | None:
         if value:
             pending_key = None
             if key == "paths":
-                raise ValueError("'paths' must be a list of globs")
-            if key == "name":
+                if not (value.startswith("[") and value.endswith("]")):
+                    raise ValueError("'paths' must be a list of globs")
+                paths = _parse_flow_sequence(value)
+            elif key == "name":
                 name = value
             elif key == "description":
                 description = value
@@ -211,6 +228,16 @@ def parse_spec_frontmatter(head_text: str) -> SpecFrontmatter | None:
             pending_key = key
             if key == "paths":
                 paths = []
+
+    if not saw_known_key:
+        # An opening `---` with no recognized key is a horizontal rule, not a
+        # frontmatter block. Silent by design: prose files are not malformed.
+        return None
+    if not closed:
+        raise ValueError(
+            f"frontmatter block never closed within the head bound "
+            f"({HEAD_MAX_BYTES} bytes / {HEAD_MAX_LINES} lines)"
+        )
 
     return SpecFrontmatter(
         paths=tuple(paths) if paths is not None else None,
@@ -247,6 +274,8 @@ def glob_to_regex(glob: str) -> re.Pattern[str]:
     grammar and examples): ``**`` as a whole segment spans zero or more
     segments; ``*`` becomes ``[^/]*``; ``?`` becomes ``[^/]``; everything
     else is escaped literally. A trailing ``/`` is expanded to ``/**`` first.
+    On case-insensitive filesystems (macOS, Windows) the pattern compiles with
+    ``re.IGNORECASE`` — see ``_CASE_INSENSITIVE_FS``.
     """
     if glob.endswith("/"):
         glob += "**"
@@ -265,27 +294,34 @@ def glob_to_regex(glob: str) -> re.Pattern[str]:
             for ch in seg
         )
         parts.append(piece if is_last else piece + "/")
-    return re.compile("^" + "".join(parts) + "$")
+    return re.compile("^" + "".join(parts) + "$", _GLOB_FLAGS)
 
 
-def _normalize_repo_relative(repo_root: Path, file_path: str | Path) -> str | None:
-    """Normalize file_path to a repo-relative POSIX string.
+def normalize_repo_relative(repo_root: Path, file_path: str | Path) -> str | None:
+    """Canonical repo-relative POSIX path — the one normalization in the
+    pipeline, used both for matching and for display.
 
-    ``repo_root`` must already be resolved. Absolute paths outside the repo
-    return None. Relative paths are assumed repo-relative.
+    Root and file are fully resolved (``strict=False``, so a file that no
+    longer exists still normalizes): symlinked repo roots, macOS's
+    ``/tmp`` → ``/private/tmp`` and ``..`` segments cannot make one file look
+    like two different paths. The result is NFC-normalized (macOS hands out
+    NFD filenames). Relative inputs are taken as repo-relative. Returns None
+    when the file resolves outside the repo.
     """
-    candidate = Path(file_path)
-    if candidate.is_absolute():
-        try:
-            return candidate.resolve().relative_to(repo_root).as_posix()
-        except (OSError, ValueError):
-            return None
-    text = str(file_path).replace("\\", "/")
-    while text.startswith("./"):
-        text = text[2:]
-    if not text or text.startswith("../"):
+    try:
+        root = Path(repo_root).resolve(strict=False)
+        candidate = Path(file_path)
+        if not candidate.is_absolute():
+            text = str(file_path).replace("\\", "/")
+            while text.startswith("./"):
+                text = text[2:]
+            if not text:
+                return None
+            candidate = root / text
+        rel = candidate.resolve(strict=False).relative_to(root).as_posix()
+    except (OSError, ValueError):
         return None
-    return text
+    return unicodedata.normalize("NFC", rel)
 
 
 def match_specs_for_file(repo_root: Path, file_path: str | Path) -> list[SpecMatch]:
@@ -301,7 +337,7 @@ def match_specs_for_file(repo_root: Path, file_path: str | Path) -> list[SpecMat
         spec_dir = repo_root / DIR_WORKFLOW / DIR_SPEC
         if not spec_dir.is_dir():
             return []
-        rel = _normalize_repo_relative(repo_root, file_path)
+        rel = normalize_repo_relative(repo_root, file_path)
         if rel is None:
             return []
 

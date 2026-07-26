@@ -162,3 +162,85 @@ spec-injection.integration.test.ts + claude.test.ts to the R-contract; contract
 decisions on the three reported gaps (9400/9500 makes the truncation path
 unreachable; the GC name pattern cannot match `+a-` subagent shards; the
 `(+N more)` summary is nearly unreachable under the greedy index packer).
+
+
+---
+
+# Stage AF — audit fixes (2026-07-25 frozen contract F1-F20)
+
+The 32-confirmed / 5-partial adversarial audit, fixed verbatim per design.md
+"Audit fix round (2026-07-25) — frozen contract F1-F20". Contract defects and
+scope gaps were reported on each stage's dispatch, never improvised away.
+
+- [x] AF-F1. Subagent clock beats: `scan_transcript` returns
+      `{turns, assistant_turns, boundaries}` (counts decided on the parsed
+      record; prefilter is only a necessary condition); new `select_beats`
+      picks assistant beats when `agent_id` is present. Real-case bar: 58/58
+      real subagent transcripts under `~/.claude/projects/**/subagents/` have
+      exactly 1 user turn (assistant beats 2..244).
+- [x] AF-F2. Collision-free `_sanitize`: 80-char filesystem-safe head +
+      `-` + `sha256(raw)[:8]` whenever any char was replaced or length
+      exceeded 80; `+a-<agent_id>` appended after per-part sanitization.
+- [x] AF-F3. One normalization: exported canonical `normalize_repo_relative`
+      (resolve `strict=False` on root+file, NFC, `re.IGNORECASE` globs on
+      darwin/win32); hook `_repo_rel` deleted.
+- [x] AF-F4. Frontmatter: flow sequences (`paths: [a, b]`), head bound raised
+      to 16 KiB / 200 lines, unterminated block => warn + skip, opening `---`
+      with no recognized key => not-frontmatter (silent).
+- [x] AF-F5. Config honesty: `tools` block/flow/`[]` grammar with early exit
+      + unknown-name stderr warn; `max_spec_chars: 0` = unlimited derive
+      ceiling (`len(text)`); `MAX_SPEC_SOURCE_BYTES` 10 MiB degrade to index
+      line with warn.
+- [x] AF-F6. Named-index reserve from true index-line strings capped at 900
+      chars (summary-only fallback); `"complete": false` records for
+      truncated FULLs; incomplete past-window re-taught as FULL, never a
+      lying ticket; fits/fits_reserved merged into one closure.
+- [x] AF-F7. GC containment: symlinked project dirs/shards skipped;
+      realpath(shard) must stay under realpath(base); name/depth gates kept.
+- [x] AF-F8. `scan_transcript` catches `Exception` -> None (wall-clock
+      degrade); a hostile transcript line can no longer abort the event.
+- [x] AF-F9. camelCase `toolInput` fallback; Windows stream reconfigure
+      covers stderr (six-hook parity).
+- [x] AF-F10. `_unquote`/`_strip_inline_comment` imported from
+      `.trellis_config`; `SpecCandidate` Protocol deleted (SpecMatch
+      imported); `load_state` equal-ts tie-break newest-wins (`>=`).
+- [x] AF-F11. Truthful docs & wording: `_derive_fitting_full` docstring
+      (binary search) + hook module docstring (delegation-era identity, no
+      T1/T2/T4 remnants) rewritten; falsified budget-constants comment fixed
+      (wrapper arithmetic); spec-injection.md synced (both beat definitions,
+      hash-suffix sanitization, named-index reserve + softened §5 claim,
+      complete-flag re-teach, GC symlink rule, 16 KiB/200 bounds, tools
+      grammar incl `[]` + unknown-name warn, corrected 9400/9500 arithmetic
+      — 69-char fixed wrapper + rel paths, ~9,348 lands whole — pid-merge
+      vocabulary purged, live-config code-map claim fixed, dynamic-plural
+      runnable summary wording, 10 MiB source bound, canonical-normalization
+      §3 contract); index.md Guidelines row rewritten (ticket-refresh,
+      character budgets) + checklist row gains `common/spec_inject.py`;
+      accepted-items notes recorded (local numeric coercion, user-global
+      state layout, mixed-comparability compaction gap + healing).
+      NOTE: the summary-line wording change inside `common/spec_inject.py`
+      and its frozen-wording tests are the remaining code half of this bullet
+      — they must land in lockstep (the docs stage recorded the contract
+      wording; code still emits the pre-F11 string).
+- [x] AF-F12. Pi TS coverage: `pi-truncate-utf8.integration.test.ts`
+      transpiles `truncateUtf8` out of `pi/extensions/trellis/index.ts.txt`
+      (typescript devDep, node:vm), taosu's repros + 0..30 cap sweep;
+      reverting the R8 fix turns the suite red (verified, then restored).
+- [ ] AF-F13. Five §12-required tests — landing in a parallel test stage
+      (spec-injection.integration.test.ts rework observed in-flight at
+      docs-stage time, incl. the three assertions F1/F4/F6 reverse by
+      contract); flip this box with that stage's own gate log, together with
+      the AF-F11 frozen-wording test updates.
+
+Verification commands used across the stages:
+
+- `cd packages/cli && pnpm lint:py` — 0 errors (warnings = HEAD baseline)
+- `pnpm lint && pnpm typecheck` (repo root) — clean
+- `python3 -m py_compile` on every changed hook/module — OK
+- `LC_ALL=C LANG=C pnpm vitest run test/scripts/` — pi suite 3/3 green; three
+  pre-existing spec-injection assertions fail BY CONTRACT (F1 subagent beats,
+  F4 unclosed-frontmatter warn+skip, F6 named-index reserve) pending AF-F13
+- Real-case bar: 58/58 real subagent transcripts scanned (1 user turn each);
+  real compacted transcript (grep compact_boundary) re-scanned; every audit
+  repro re-run before (git HEAD) vs after per finding
+- Mirrors: `diff -q` template vs live twin after every edit — byte-identical

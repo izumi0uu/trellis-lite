@@ -34,7 +34,7 @@ paths:
 | Injection hook (IO shell) | `packages/cli/src/templates/shared-hooks/inject-spec-context.py` (live twin `.claude/hooks/inject-spec-context.py`) |
 | Registration | `packages/cli/src/templates/claude/settings.json` `PostToolUse` (live twin `.claude/settings.json`) |
 | Distribution | `packages/cli/src/templates/shared-hooks/index.ts` `SHARED_HOOKS_BY_PLATFORM` (claude only this iteration) |
-| Config | `.trellis/config.yaml` `spec_injection:` (commented template section in `templates/trellis/config.yaml`) |
+| Config | `spec_injection:` section of `.trellis/config.yaml` — shipped commented-out (defaults apply) in both the template (`templates/trellis/config.yaml`) and this repo's live config |
 | Pull mode | `get_context.py --mode spec --file <path>` (dispatch in `common/git_context.py`) |
 | Refresh state | `${TRELLIS_SPEC_STATE_DIR:-~/.trellis/spec-inject}/<project16>/<identity>.jsonl` (user-global, outside the repo) |
 
@@ -51,9 +51,11 @@ spec-path listing, index.md readers, byte-based spec-refresh hash tracking).
 
 - Only files whose **first line is exactly `---`** (a UTF-8 BOM before it is
   tolerated) enter frontmatter parsing.
-- The scan is a bounded head-read: first **8 KiB / 100 lines**, whichever ends
-  first; parsing stops at the closing `---` or at the bound. Content past the
-  bound is never seen — keep frontmatter short and at the very top.
+- The scan is a bounded head-read: first **16 KiB / 200 lines**, whichever
+  ends first; parsing stops at the closing `---`. A frontmatter block still
+  open when the bound is reached is an error (warn + skip, below) — the
+  pipeline never routes on a half-read block. Keep frontmatter short and at
+  the very top.
 - Key lines match `^([A-Za-z_][A-Za-z0-9_-]*):(.*)$` (after stripping
   surrounding whitespace). Values are unquoted (matching `"` / `'` pairs
   removed) and inline ` # …` comments are stripped (a `#` inside a quoted
@@ -61,8 +63,10 @@ spec-path listing, index.md readers, byte-based spec-refresh hash tracking).
 - Recognized keys — parsing is hand-rolled in `parse_spec_frontmatter()`
   (house pattern, modeled on `trellis_config.parse_simple_yaml`; **no YAML
   dependency**):
-  - `paths:` — must have an empty inline value followed by `- <glob>` list
-    items (flat list).
+  - `paths:` — either an empty inline value followed by `- <glob>` list items
+    (flat block list), or a flow sequence on the key line — `paths: [a, b]`
+    (split on commas, each item unquoted; `[]` declares no paths, so the spec
+    stays inert).
   - `description:` — single-line scalar; reused in `<spec-index>` degradation
     lines and pull-mode output.
   - `name:` — single-line scalar; tolerated, currently unused by matching.
@@ -76,15 +80,21 @@ spec-path listing, index.md readers, byte-based spec-refresh hash tracking).
   - Stray `- item` lines outside a pending `paths:` are ignored.
   - Any other unrecognized line shape is ignored.
   - Blank lines and `#` comment lines are skipped.
+  - An opening `---` with **no recognized key** (`paths` / `name` /
+    `description`) before the closing marker is not frontmatter at all — a
+    Markdown horizontal rule opening a prose file — and is skipped silently,
+    no warning.
 
 ### Malformed frontmatter (whole spec skipped, stderr warning)
 
 `parse_spec_frontmatter()` raises `ValueError` — and `match_specs_for_file()`
-skips that spec with a `[WARN] spec_match:` line on stderr — **only** for a
-malformed `paths:` key itself:
+skips that spec with a `[WARN] spec_match:` line on stderr — **only** for:
 
-- `paths: <inline value>` (a scalar where a list of globs belongs)
+- `paths: <scalar>` that is not a flow sequence (a scalar where a list of
+  globs belongs)
 - `paths: >` / `paths: |` (a block scalar where a list of globs belongs)
+- a frontmatter block still open when the head bound (16 KiB / 200 lines) is
+  reached — never silently partial
 
 ### Invalid globs (that glob skipped, the rest of the file still applies)
 
@@ -133,6 +143,11 @@ Examples (mirrored from the `spec_match.py` module docstring; keep in sync):
 | `src/util?.py` | `src/utils.py` | `src/util.py`, `src/utilXY.py` |
 | `packages/cli/` | same as `packages/cli/**` | — |
 
+On case-insensitive filesystems (macOS, Windows) the compiled regexes carry
+`re.IGNORECASE`: the very same file can be handed to the hook in a case the
+glob author never wrote, and over-injecting is the safe side of the misfire
+asymmetry (§4).
+
 ---
 
 ## 3. Matching scan (`common/spec_match.py`)
@@ -145,15 +160,21 @@ match_specs_for_file(repo_root, file_path) -> list[SpecMatch]
 
 Contract:
 
-1. `file_path` may be absolute or repo-relative. Normalization: backslashes →
-   `/`, leading `./` stripped; absolute paths outside the repo and `../`
-   prefixes yield **no matches** (return `[]`), never an error.
+1. `file_path` may be absolute or repo-relative. Normalization is the exported
+   canonical `normalize_repo_relative()` — the **one** normalization in the
+   pipeline, used for matching and display alike (`rel_path` shown and `rel`
+   matched are the same string by construction): root and file are fully
+   resolved (`strict=False`, so symlinks and macOS `/tmp` → `/private/tmp`
+   cannot make one file look like two), the result is NFC-normalized;
+   backslashes → `/`, leading `./` stripped. A file resolving outside the
+   repo yields **no matches** (return `[]`), never an error.
 2. Bail-out before any I/O when `.trellis/spec/` does not exist → `[]`.
 3. Scans `.trellis/spec/**/*.md` via `rglob` — `index.md` files included if
    they declare `paths:`. Each file gets a **bounded head-read only**
-   (8 KiB); spec bodies are never read during matching.
-4. Unreadable file → stderr warn, skip. Malformed `paths:` → stderr warn,
-   skip. No frontmatter or no/empty `paths` → skip silently.
+   (16 KiB); spec bodies are never read during matching.
+4. Unreadable file → stderr warn, skip. Malformed frontmatter (bad `paths:`
+   or an unterminated block) → stderr warn, skip. No frontmatter or no/empty
+   `paths` → skip silently.
 5. **First matching glob per spec wins** (`break`): each spec appears at most
    once per event regardless of how many of its globs match.
 6. Results are sorted by `rel_path` — deterministic injection order.
@@ -178,13 +199,15 @@ are wiring-only.
 ### Structure: pure logic vs IO shell
 
 Decision logic lives in **`common/spec_inject.py`** (`scan_transcript`,
-`within_window`, `decide`, `truncate_chars`, `render_full` / `render_ticket`,
-`assemble_payload`, `make_record`) — importing it has no side effects, and
-unit tests import it directly. The hook is the IO shell: stdin, config,
-identity, state files, locking, GC, one print. One accepted trade-off is
-recorded here deliberately: the hook reads and hashes every matched spec
+`select_beats`, `within_window`, `decide`, `truncate_chars`, `render_full` /
+`render_ticket`, `assemble_payload`, `make_record`) — importing it has no side
+effects, and unit tests import it directly. The hook is the IO shell: stdin,
+config, identity, state files, locking, GC, one print. One accepted trade-off
+is recorded here deliberately: the hook reads and hashes every matched spec
 *before* deciding — sha-change-beats-window requires knowing the current
-content, and a stat/mtime shortcut would weaken that contract.
+content, and a stat/mtime shortcut would weaken that contract. The read is
+bounded: a spec source over **10 MiB** (`MAX_SPEC_SOURCE_BYTES`) is never
+read+hashed — it degrades straight to an index line with a stderr warn.
 
 ### Flow (in order; every early exit is `exit 0`, no stdout)
 
@@ -196,14 +219,15 @@ content, and a stat/mtime shortcut would weaken that contract.
 6. Bail **before any spec scan** when `.trellis/spec/` is absent — a spec-less
    project pays only the subprocess spawn.
 7. Config gate: `spec_injection.enabled: false` → silent exit; `tool_name` not
-   in `spec_injection.tools` → silent exit.
+   in `spec_injection.tools` → silent exit (`tools: []` disables every
+   trigger — early exit).
 8. Import `common.spec_match` + `common.spec_inject` from `.trellis/scripts`
    (sys.path extension); import failure → degrade to nothing.
 9. Match; no matches → silent exit.
 10. Resolve identity; unless stateless: run GC (hourly gate), open the
     identity's state shard for read+append (**the open doubles as the
     writability probe** — failure trips the circuit breaker and the event runs
-    stateless ticket-only), take a best-effort `fcntl` lock, load the merged
+    stateless ticket-only), take a best-effort `fcntl` lock, load the shard's
     state, and read the clock from the transcript (the subagent's own when the
     event carries an `agent_id`). Then run the per-spec decision engine and
     assemble the budgeted payload; state lines are appended **under the same
@@ -268,11 +292,14 @@ silently dropped:
 ```
 
 The index block is itself budget-bounded: index lines that would push the
-payload past `max_total_chars` collapse into one summary line —
-`- (+N more governing specs over budget — run get_context.py --mode spec
---file <edited rel> to list them)`. The summary is budget-checked like
-everything else; if even the summary cannot fit, it is dropped with a stderr
-warning — the ceiling always wins.
+payload past `max_total_chars` collapse into one summary line, dynamically
+pluralized (`+1 more governing spec` / `+N more governing specs`) and carrying
+the pull-mode command runnable as printed —
+`- (+N more governing spec(s) over budget — run
+python3 ./.trellis/scripts/get_context.py --mode spec --file <edited rel>
+to list them)`. The summary is budget-checked like everything else; if even
+the summary cannot fit, it is dropped with a stderr warning — the ceiling
+always wins.
 
 ### Decision engine (ticket-refresh)
 
@@ -292,6 +319,7 @@ elif last.sha256 != h:     emit FULL     # spec changed → re-teach in full
 elif boundaries_now > last.boundaries    # both known
                            emit FULL     # compacted since last → text is gone
 elif within window:        silent        # no state append
+elif not last.complete:    emit FULL     # recorded FULL was truncated → re-teach whole
 else:                      emit TICKET   # refresh attention cheaply
 ```
 
@@ -304,6 +332,12 @@ else:                      emit TICKET   # refresh attention cheaply
 - The compaction check sits **before** the window check: after a
   `compact_boundary` the injected text is genuinely gone — a ticket would
   point at a memory that no longer exists, so the spec is re-taught in full.
+- The completeness check sits **after** the window check: a record whose FULL
+  body was emitted truncated below the whole spec carries `"complete": false`
+  (absent == whole), and once past the window it is re-taught as another FULL
+  instead of a ticket — the stateful ticket wording ("you were shown this
+  spec") must never be a lie. Consequence: a spec larger than its effective
+  budget re-teaches in full every window and never tickets.
 - FULL and TICKET emissions both append a state record; silent and
   budget-dropped specs record nothing and stay eligible for a later event.
   Overflow degradation applies to FULL bodies only — tickets are small and
@@ -339,22 +373,42 @@ platform — always yields a payload key, and unreliable CLI-vs-IDE process
 detection would risk a cross-session collision, violating the asymmetry
 principle. It is documented for a future CLI-only platform.
 
-Sanitization restricts the final identity to `[A-Za-z0-9_-]` (no `.`, so an
-identity can never mimic the `.<pid>` legacy shard suffix the GC name pattern
-recognizes; no `+`, so the subagent suffix is unforgeable); an all-special id
-falls back to a hash so distinct sessions never collide onto one identity.
+Sanitization keeps a readable filesystem-safe head — the first 80 characters,
+every character outside `[A-Za-z0-9_-]` replaced one-for-one by `-` — and,
+whenever any character was replaced OR the raw key exceeded 80 characters,
+appends `-` + the first 8 hex of `sha256(raw)`. The suffix makes the mapping
+injective over the keys the hook is handed: `a/b` vs `a:b`, or two keys
+sharing an 80-character head, can no longer fold onto one state file. (The
+shared resolver applies its own coarser collapsing before this hook ever sees
+the key, so two raw session ids that *it* folds together still share state —
+a documented upstream limit, not closable from this hook.) The output stays
+in `[A-Za-z0-9_-]`: `.` maps to `-`, so an identity can never mimic the
+`.<pid>` legacy shard suffix the GC name pattern recognizes, and `+` maps to
+`-`, so the `+a-<agent_id>` subagent suffix — appended AFTER each part is
+sanitized — is unforgeable.
 
 ### Clock (refresh-window units)
 
-The window is measured in **real user turns** counted from the transcript when
-it is readable, else in **epoch seconds**. A state record stores both when
-available.
+The window is measured in **beats** of the agent's own transcript when it is
+readable, else in **epoch seconds**. A state record stores both when
+available (the beat count lands in the record's `turns` field). What a beat
+is depends on which transcript it is:
 
-- A **turn** = a transcript line with `type=="user"` AND `message.content` is
-  a string AND no `isMeta`. Tool results and meta lines carry structured
-  content and do not count. (Raw line counts run tens of lines per real turn
-  on measured transcripts — which is why the v1 line clock measured the wrong
-  thing and was replaced by turns.)
+- **Main session**: a beat is a **real user turn** — a transcript line with
+  `type=="user"` AND `message.content` is a string AND no `isMeta`. Tool
+  results and meta lines carry structured content and do not count. (Raw line
+  counts run tens of lines per real turn on measured transcripts — which is
+  why the v1 line clock measured the wrong thing and was replaced by turns.)
+- **Subagent** (the event carries an `agent_id`): a beat is an
+  **assistant-message line** (`type=="assistant"`, decided on the parsed
+  record, never on a substring guess) — the agent-loop iteration is the
+  conversation beat there. A subagent transcript is structurally frozen at
+  exactly one real user turn (its prompt) forever — verified 58/58 real
+  subagent transcripts, 2026-07-25 — so user turns cannot measure anything in
+  one. `scan_transcript` returns `{"turns", "assistant_turns", "boundaries"}`
+  and `select_beats` picks by `agent_id` presence. One window key
+  (`refresh_window_turns`) covers both — its unit is beats of that
+  transcript.
 - A **compact boundary** = a line with `type=="system"`,
   `subtype=="compact_boundary"`. Transcripts are **append-only**: `/compact`
   appends a boundary record and the file never shrinks (verified on real
@@ -362,10 +416,13 @@ available.
   boundary counts — `boundaries_now > boundaries_at_last_emission` → FULL
   (decision engine above) — never by watching the transcript get shorter.
 - The scan is a single pass, one line at a time, with byte substring
-  prefilters (`"type":"user"` — both with and without a space after the
-  colon — / `"compact_boundary"`) applied before any
-  `json.loads`; a transcript larger than **64 MiB** falls back to the wall
-  clock.
+  prefilters (`"type":"user"` / `"type":"assistant"` — each with and without
+  a space after the colon — / `"compact_boundary"`) applied before any
+  `json.loads`; the prefilter is only a necessary condition — every count is
+  decided on the parsed record. A transcript larger than **64 MiB**, or one
+  that is unreadable or hostile in any way (`scan_transcript` catches
+  `Exception`, not just `OSError`), falls back to the wall clock — a
+  transcript line must never be able to abort an injection event.
 - **Subagent events** (`agent_id` present) read the **subagent's own
   transcript**, derived from the parent's path:
   `<transcript dir>/<parent stem>/subagents/agent-<agent_id>.jsonl`
@@ -373,13 +430,19 @@ available.
   clock — **never** the parent's counts: the parent idles while the subagent
   runs, so its clock would under-count and under-inject, the unacceptable
   direction.
-- Comparison is turns-to-turns when both the current clock and the recorded
-  record carry a turn count, else seconds-to-seconds; truly incomparable units
+- Comparison is beats-to-beats when both the current clock and the recorded
+  record carry a beat count, else seconds-to-seconds; truly incomparable units
   are treated as **past-window** (the over-inject side). A **negative delta**
   is a plain clock anomaly (wall-clock skew, a replaced transcript file) and
   is also treated as past-window — the safe direction. It does **not** detect
   `/compact` (transcripts never shrink; compaction detection is the boundary
   rule above).
+- **Known bounded gap** (accepted, 2026-07-25): a record written under the
+  wall clock carries no boundary count, so a later transcript-based event
+  cannot anchor the compaction comparison against it — one `/compact` inside
+  that gap goes undetected and a ticket may point at compacted-away text. The
+  gap self-heals on the next transcript-based emission: that record stores
+  the current boundary count, re-arming compaction detection.
 - `refresh_window_turns: 0` or `refresh_window_seconds: 0` means "never
   refresh" in that clock mode — both `0` reproduces the legacy inject-once
   behavior.
@@ -394,15 +457,20 @@ available.
   (measured: 12 concurrent writers × 38 KB, zero corruption). State is
   **user-global and outside the repo**: nothing lands in `.trellis/`, and
   sibling worktrees sharing a realpath share state. `TRELLIS_SPEC_STATE_DIR`
-  overrides the base dir (tests / hermeticity).
+  overrides the base dir (tests / hermeticity). The layout intentionally
+  diverges from the channel hooks' per-project runtime buckets — user-global
+  is by design here (review-agreed, 2026-07-25), not an oversight to converge
+  later.
 - Each emission appends one line:
 
   ```json
   {"v":2,"spec":"<rel>","sha256":"<64hex>","mode":"full"|"ticket","ts":<float>,"turns":<int|null>,"boundaries":<int|null>}
   ```
 
-  Records with `v != 2` are ignored on read (safe direction: an ignored
-  record re-injects rather than stays silent).
+  A FULL whose emitted body was truncated below the whole spec additionally
+  carries `"complete": false` (absent == whole; §4 Decision engine). `turns`
+  stores the beat count (§4 Clock). Records with `v != 2` are ignored on read
+  (safe direction: an ignored record re-injects rather than stays silent).
 - **Locking**: a best-effort exclusive `fcntl.flock` is held across
   read→decide→append, closing the duplicate-injection race between concurrent
   hook processes on POSIX. No `fcntl` (Windows) or an unsupported filesystem →
@@ -425,8 +493,11 @@ available.
   `^[0-9a-f]{16}$` and the shard name matches
   `^[A-Za-z0-9_+-]+(\.[0-9]+)?\.jsonl$` (`+` admits the `+a-<agent_id>`
   subagent suffix; the digit alternative covers our own
-  legacy pid shards). Foreign files and directories are never touched, even
-  via a hostile `TRELLIS_SPEC_STATE_DIR`. Best-effort, errors ignored.
+  legacy pid shards). A symlinked project dir or shard is skipped outright,
+  and every unlink candidate must still resolve (`realpath`) under the
+  resolved base — a planted link cannot walk the GC out of its own tree.
+  Foreign files and directories are never touched, even via a hostile
+  `TRELLIS_SPEC_STATE_DIR`. Best-effort, errors ignored.
 
 ---
 
@@ -438,14 +509,23 @@ available.
 | `max_total_chars` | 9500 | the **assembled payload string** — wrappers, `\n\n` separators, the `<spec-index>` block and its `(+N more)` summary, tickets: everything is counted, nothing is appended unchecked |
 
 - `0` = unlimited for either cap (`channel.worker_guard` convention).
+  `max_spec_chars: 0` lifts the per-spec cap only — a finite
+  `max_total_chars` still bounds the emitted block (the derive step below
+  then searches up to the whole body, not up to a dead cap of 1).
+- A spec source larger than **10 MiB** (`MAX_SPEC_SOURCE_BYTES`) is never
+  read+hashed: it degrades straight to an index line with a stderr warn — an
+  inlined body that big could never fit the budget anyway.
 - Units are **characters** because the platform's ceiling is characters:
   Claude Code documents a 10,000-**character** cap on all hook output strings
   including `additionalContext` (re-verified 2026-07-25,
   code.claude.com/docs/en/hooks.md). v1 counted UTF-8 bytes, which made CJK
   specs pay 3× — a ~9,300-character CJK spec that fits the platform ceiling
   whole was truncated at a third of its length. 9,500 leaves headroom under
-  the ceiling; 9,400 leaves wrapper room so a spec at the per-spec cap still
-  lands whole.
+  the ceiling. The `<spec-context>` wrapper costs 69 fixed characters plus
+  the two rel paths (~152 in a typical case), so under the default caps a
+  spec lands whole only up to **~9,348 characters**; a body between ~9,348
+  and the 9,400 per-spec cap is derived-truncated further (below) — a spec
+  at the per-spec cap does **not** land whole.
 - Truncation slices code points (`body[:max_spec_chars]`), which can never
   split a multi-byte sequence — byte-level `truncate_utf8` is not needed in
   this hook.
@@ -459,11 +539,14 @@ available.
   index-only mode by another route). Only when no usable prefix fits does the
   spec degrade to an index line (path + description); assembly continues so a
   smaller later match may still fit.
-- While candidates remain behind the current one, FULL packing **reserves one
-  summary-line's worth of budget** (contract amendment 3) so a maximal FULL
-  cannot starve the `<spec-index>` block — the `(+N more)` summary line is
-  guaranteed reachable; when it does not fit, already-chosen index lines are
-  popped (re-counted as dropped) until it does.
+- While candidates remain behind the current one, FULL packing **reserves the
+  actual index lines those candidates would need** — the true per-candidate
+  strings, not estimates — plus the summary line, capped at
+  `INDEX_RESERVE_MAX_CHARS` (900); when the cap binds, the reserve falls back
+  to the summary line alone. Named index lines are therefore guaranteed only
+  within the cap; beyond it only the `(+N more)` summary is guaranteed
+  reachable — and when even the summary does not fit, already-chosen index
+  lines are popped (re-counted as dropped) until it does.
 - Ticket blocks are counted **last** — after every FULL block and the
   `<spec-index>` degradation block — and dropped with a stderr warning if even a
   ticket does not fit, so the JSON envelope is never malformed.
@@ -479,7 +562,7 @@ spec_injection:
   enabled: true                 # false disables push injection entirely
   max_spec_chars: 9400          # per matched spec file; 0 = unlimited
   max_total_chars: 9500         # whole per-event payload; 0 = unlimited
-  refresh_window_turns: 30      # real user turns; 0 = never refresh
+  refresh_window_turns: 30      # beats of the agent's own transcript (§4 Clock); 0 = never refresh
   refresh_window_seconds: 2700  # wall-clock fallback; 0 = never refresh
   tools:                        # tool events that trigger injection
     - Read
@@ -499,11 +582,18 @@ spec_injection:
   seconds key is the wall-clock fallback. `0` in a key = never refresh in that
   clock mode; both `0` = legacy inject-once behavior.
 - `tools` filters which tool events trigger the hook (names as the platform
-  reports them). An **empty list is a deliberate "never trigger"** and is
-  respected; a non-list value warns and falls back to the default four.
+  reports them). Both grammars are accepted: a block list (`- Edit` items)
+  and a flow sequence (`tools: [Edit, Write]`). An **empty list (`[]`, either
+  grammar) is a deliberate "never trigger"** and is respected — early exit;
+  unknown tool names warn once to stderr (they can never match); any other
+  value shape warns and falls back to the default four.
 - `enabled: false` disables the hook only; pull mode is unaffected.
 - There is deliberately **no path mapping in config.yaml** — frontmatter is
   the single source of truth (two sources would drift).
+- Numeric coercion for these keys is implemented locally in the hook, not in
+  the shared config helpers — accepted decision (2026-07-25): widening the
+  shared `common/config.py` has more blast radius than the small duplication
+  costs.
 
 ---
 
@@ -565,9 +655,10 @@ checklists, no change to sub-agent JSONL curation or its budgets.
 | Failure | Behavior |
 |---|---|
 | No frontmatter anywhere (all pre-existing projects) | zero matches, no output — byte-identical to no hook |
-| Malformed `paths:` in one spec | stderr warn, that spec skipped |
+| Malformed frontmatter in one spec (bad `paths:` or an unterminated block) | stderr warn, that spec skipped |
 | One invalid glob in a spec | stderr warn, that glob skipped, the spec's other globs still apply |
 | Spec file unreadable | stderr warn, skipped |
+| Spec file over 10 MiB | stderr warn, degraded to an index line (never read+hashed) |
 | Refresh state unwritable (open/create fails) | circuit breaker: the event runs stateless ticket-only — bounded cost, never a FULL re-emission loop |
 | Refresh state unreadable but writable | reads as empty → FULL (the inject direction) |
 | State append fails after emission | stderr warn, emission stands |
@@ -616,15 +707,20 @@ decision-engine cases import `common/spec_inject.py` directly):
 - Frontmatter parsing: no-frontmatter file, BOM tolerance, quotes and inline
   comments, unknown keys ignored, block-scalar `description: >` tolerated,
   stray list items ignored, `paths:` scalar / block scalar raising.
-- Clock: real-turn counting (tool-result and `isMeta` lines excluded),
-  boundary counting, prefilter behavior, oversized transcript → None.
+- Clock: beat counting for BOTH transcript kinds — real user turns in a main
+  transcript (tool-result and `isMeta` lines excluded), assistant messages in
+  a subagent transcript (its user turns are frozen at 1) — plus boundary
+  counting, prefilter behavior, oversized transcript → None.
+- Frontmatter robustness: flow-sequence `paths: [a, b]`; an unterminated
+  block at the head bound warns + skips; an hr-opening prose file is silently
+  not-frontmatter; case-insensitive glob match on darwin/win32 (IGNORECASE).
 
 Hook E2E matrix (fabricated PostToolUse stdin; every case asserts exit 0 and
 valid-JSON-or-empty stdout; set `TRELLIS_SPEC_STATE_DIR` per run for
 hermeticity):
 
 - first touch → FULL `<spec-context>` with a `sha256` attr; second touch within
-  the (turns) window → empty; touch past the fixture-controlled window →
+  the beats window → empty; touch past the fixture-controlled window →
   `<spec-ticket>` carrying the same sha; spec content edited between touches →
   FULL again (hash beats window); a `compact_boundary` appended between
   touches → FULL again (boundary beats window).
@@ -637,7 +733,9 @@ hermeticity):
   identity with `v:2` records; stale conforming shards pruned by GC,
   non-conforming names and foreign dirs untouched.
 - oversized spec → character truncation notice at cap; total-budget overflow →
-  `<spec-index>` degradation; index overflow → `(+N more)` summary.
+  `<spec-index>` degradation; index overflow → `(+N more)` summary; a
+  truncated FULL records `complete: false` and re-teaches as FULL past the
+  window (the stateful ticket wording is never a lie).
 - malformed `paths:` skipped with stderr warn; `spec_injection.enabled:
   false` → empty; non-trigger tool / missing `file_path` / no `.trellis` → empty.
 
@@ -662,7 +760,8 @@ Template shape:
   of truth. When adding a Pre-Development Checklist mapping to `index.md`,
   add the matching frontmatter globs in the same commit (and vice versa).
 - Keep frontmatter at the very top and short — the head-read bound
-  (8 KiB / 100 lines) is a hard parsing horizon.
+  (16 KiB / 200 lines) is a hard parsing horizon, and a block still open at
+  the bound skips the whole spec (warned).
 - Keep stdout reserved for the hook JSON envelope; warnings go to stderr.
 - Re-verify Claude's documented additionalContext ceiling before changing
   budget defaults, and record the verification date here (last verified
@@ -683,7 +782,8 @@ Template shape:
 - Don't count budgets in bytes — the platform ceiling is characters, and byte
   caps make CJK specs pay 3×.
 - Don't measure the refresh window in raw transcript lines — tool results
-  inflate line counts by an order of magnitude; count real user turns.
+  inflate line counts by an order of magnitude; count beats (§4 Clock: real
+  user turns in a main session, assistant messages in a subagent).
 - Don't symlink specs into code directories (rationale in §9).
 - Don't register the hook on a new platform without verifying its tool-event
   hook consumes `additionalContext` (see grok: hook exists, output ignored).
@@ -697,7 +797,7 @@ Template shape:
 - Budget defaults, character accounting, or the assumed platform ceiling
   (re-verify the documented limit)
 - The decision engine (FULL / TICKET / silent state machine), the compaction
-  rule, or the refresh-window clock semantics (turn definition included)
+  rule, or the refresh-window clock semantics (both beat definitions included)
 - Identity ladder tiers, sanitization, or the subagent `agent_id` split
 - Refresh state schema, location, locking, the circuit breaker, or the GC
   scope/window

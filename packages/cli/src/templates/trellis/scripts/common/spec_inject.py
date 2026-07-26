@@ -11,10 +11,21 @@ locking, GC) lives in the hook that calls it —
 directly.
 
 Clock
-    A transcript's *turn* count is the number of real user turns: a line with
-    ``type == "user"``, a string ``message.content``, and no ``isMeta`` (tool
-    results and meta lines carry structured content and do not count). A
-    *boundary* is a ``type == "system"`` line with
+    The window is measured in *beats* of the agent's own transcript, and what
+    a beat is depends on which transcript it is:
+
+    - Main session (``turns``): a real user turn — a line with
+      ``type == "user"``, a string ``message.content``, and no ``isMeta``
+      (tool results and meta lines carry structured content and do not count).
+    - Subagent (``assistant_turns``): an assistant message — a line with
+      ``type == "assistant"``. A subagent transcript has exactly one real user
+      turn (its prompt) forever, so user turns cannot measure anything there;
+      the agent loop's iteration is the conversation beat instead.
+
+    ``scan_transcript`` counts both; the caller picks (see ``select_beats``)
+    and passes the chosen count as ``clock["turns"]``.
+
+    A *boundary* is a ``type == "system"`` line with
     ``subtype == "compact_boundary"``: the transcript is append-only, so a
     boundary appearing after an emission means the injected text was compacted
     away and must be re-taught in full.
@@ -33,12 +44,23 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Sequence
+
+from .spec_match import SpecMatch
 
 # Bound on how much of a transcript is scanned for the clock. Beyond this the
 # caller falls back to the wall clock rather than pay an unbounded read.
 TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
+
+# Bound on the size of a spec file we are willing to read and hash. A spec
+# larger than this degrades to an index line (warned) — an inlined body that
+# big could never fit the budget anyway, and the read+hash would be unbounded.
+MAX_SPEC_SOURCE_BYTES = 10 * 1024 * 1024
+
+# Upper bound on the room reserved for named index lines while FULL blocks are
+# still being packed. Beyond it the reserve falls back to the summary line
+# alone: a big fan-out must not starve the specs that can still be taught.
+INDEX_RESERVE_MAX_CHARS = 900
 
 # State record schema version. Records with any other version are ignored
 # (safe direction: an ignored record re-injects rather than stays silent).
@@ -49,20 +71,8 @@ STATE_VERSION = 2
 # Contract amendment 4: tolerate both JSON spacings — Claude Code emits
 # '"type":"user"' (no space) but a conforming producer may emit a space.
 _USER_PREFILTERS = (b'"type":"user"', b'"type": "user"')
+_ASSISTANT_PREFILTERS = (b'"type":"assistant"', b'"type": "assistant"')
 _BOUNDARY_PREFILTER = b'"compact_boundary"'
-
-
-class SpecCandidate(Protocol):
-    """Structural view of ``spec_match.SpecMatch`` (kept decoupled)."""
-
-    @property
-    def spec_path(self) -> Path: ...
-
-    @property
-    def rel_path(self) -> str: ...
-
-    @property
-    def description(self) -> str | None: ...
 
 
 def _warn(message: str) -> None:
@@ -97,16 +107,20 @@ def scan_transcript(
     path: str | None,
     max_bytes: int = TRANSCRIPT_MAX_BYTES,
 ) -> dict[str, int] | None:
-    """Return ``{"turns": int, "boundaries": int}`` for a transcript file.
+    """Return ``{"turns", "assistant_turns", "boundaries"}`` for a transcript.
 
     Single pass, one line at a time, with a substring prefilter before any
-    ``json.loads``. Returns None when the path is empty, unreadable, or larger
-    than ``max_bytes`` — the caller then uses the wall clock.
+    ``json.loads`` — but every count is decided on the *parsed* record, never
+    on the substring alone. Returns None when the path is empty, unreadable,
+    larger than ``max_bytes``, or hostile in any other way: a transcript line
+    must never be able to abort an injection event, so the whole scan degrades
+    to the wall clock instead of raising.
     """
     if not isinstance(path, str) or not path.strip():
         return None
 
     turns = 0
+    assistant_turns = 0
     boundaries = 0
     read = 0
     try:
@@ -116,8 +130,9 @@ def scan_transcript(
                 if read > max_bytes:
                     return None
                 is_user = any(p in raw for p in _USER_PREFILTERS)
+                is_assistant = any(p in raw for p in _ASSISTANT_PREFILTERS)
                 is_boundary = _BOUNDARY_PREFILTER in raw
-                if not (is_user or is_boundary):
+                if not (is_user or is_assistant or is_boundary):
                     continue
                 try:
                     record = json.loads(raw)
@@ -127,12 +142,32 @@ def scan_transcript(
                     continue
                 if is_user and _is_real_turn(record):
                     turns += 1
+                if is_assistant and record.get("type") == "assistant":
+                    assistant_turns += 1
                 if is_boundary and _is_compact_boundary(record):
                     boundaries += 1
-    except OSError:
+    except Exception:
+        # Fail-soft: an unreadable, truncated or otherwise hostile transcript
+        # degrades this event to the wall clock; it never breaks the hook.
         return None
 
-    return {"turns": turns, "boundaries": boundaries}
+    return {
+        "turns": turns,
+        "assistant_turns": assistant_turns,
+        "boundaries": boundaries,
+    }
+
+
+def select_beats(counts: dict[str, int] | None, subagent: bool) -> int | None:
+    """Pick the beat count that measures THIS agent's conversation.
+
+    A subagent transcript is frozen at one real user turn (its prompt), so its
+    beats are assistant messages; a main transcript beats on real user turns.
+    None (no readable transcript) → the caller falls back to the wall clock.
+    """
+    if not counts:
+        return None
+    return counts.get("assistant_turns") if subagent else counts.get("turns")
 
 
 def within_window(
@@ -144,7 +179,7 @@ def within_window(
     """True when the last emission is still inside the refresh window (→ stay
     silent).
 
-    Compares turns-to-turns when both sides have a turn count, else
+    Compares beats-to-beats when both sides have a beat count, else
     seconds-to-seconds; truly incomparable → past-window (False → refresh, the
     over-inject side of the asymmetry). A window of ``0`` means never refresh
     (infinite window → always True). A NEGATIVE delta is a clock anomaly
@@ -183,7 +218,9 @@ def decide(
     Order is contractual: statelessness first (bounded cost, no state to
     consult), then first sight, then content change, then compaction (the
     injected text is genuinely gone — a ticket would point at a memory that no
-    longer exists), then the refresh window.
+    longer exists), then the refresh window, and finally completeness: a
+    ticket says "you were shown this spec", which is a lie when the recorded
+    FULL was truncated, so an incomplete record is re-taught in full instead.
     """
     if stateless:
         return "ticket"
@@ -203,6 +240,10 @@ def decide(
 
     if within_window(clock, last, win_turns, win_seconds):
         return "silent"
+
+    # "complete" is optional and absent means a whole body was shown.
+    if last.get("complete") is False:
+        return "full"
     return "ticket"
 
 
@@ -276,8 +317,11 @@ def make_record(
     sha256_hex: str,
     mode: str,
     clock: dict[str, Any],
+    complete: bool = True,
 ) -> dict[str, Any]:
-    return {
+    """Build a state record. ``complete=False`` marks a FULL whose body was
+    truncated below the whole spec — an absent flag means whole."""
+    record: dict[str, Any] = {
         "v": STATE_VERSION,
         "spec": rel_path,
         "sha256": sha256_hex,
@@ -286,6 +330,9 @@ def make_record(
         "turns": clock.get("turns"),
         "boundaries": clock.get("boundaries"),
     }
+    if not complete:
+        record["complete"] = False
+    return record
 
 
 # =============================================================================
@@ -300,13 +347,20 @@ def _derive_fitting_full(
     text: str,
     max_spec_chars: int,
     fits,
-) -> str | None:
+) -> tuple[str, bool] | None:
     """Largest truncated FULL block that fits the remaining total budget.
 
-    Estimates the available body size from the empty-body wrapper and the
-    truncation notice, then walks down in small steps to absorb the
-    digit-length wobble of the notice text. Returns None when no non-empty
-    prefix fits (the caller degrades to an index line).
+    Binary search over the body cap: the rendered block's length is monotone
+    non-decreasing in the cap, so the largest cap whose block still ``fits``
+    is found in ~log2(len(text)) renders (this also absorbs the digit-length
+    wobble of the notice text, which a closed-form estimate cannot).
+
+    The search ceiling is ``max_spec_chars`` when set and the whole body when
+    it is ``0`` (unlimited) — with a ceiling of 1, as an unguarded
+    ``max(1, 0)`` would give, nothing but a one-character spec could ever be
+    derived. Returns ``(block, complete)`` — ``complete`` is True only when
+    the winning cap covered the whole body — or None when no non-empty prefix
+    fits (the caller degrades to an index line).
     """
     def candidate_for(cap: int) -> str:
         body = truncate_chars(text, cap)
@@ -314,24 +368,27 @@ def _derive_fitting_full(
             body += truncation_notice(spec_rel, cap)
         return render_full(edited_rel, spec_rel, sha12, body)
 
-    # Candidate length is monotone non-decreasing in the cap, so binary-search
-    # the largest cap whose block still fits the joined payload.
-    lo, hi = 1, max(1, max_spec_chars)
-    best: str | None = None
+    ceiling = len(text) if max_spec_chars <= 0 else min(max_spec_chars, len(text))
+    lo, hi = 1, max(1, ceiling)
+    best: tuple[str, bool] | None = None
     while lo <= hi:
         mid = (lo + hi) // 2
         candidate = candidate_for(mid)
         if fits(candidate):
-            best = candidate
+            best = (candidate, mid >= len(text))
             lo = mid + 1
         else:
             hi = mid - 1
     return best
 
 
+def _index_line(match: SpecMatch) -> str:
+    return f"- {match.rel_path} — {match.description or 'no description'}"
+
+
 def assemble_payload(
     edited_rel: str,
-    matches: Sequence[SpecCandidate],
+    matches: Sequence[SpecMatch],
     stateless: bool,
     state_records: dict[str, dict[str, Any]],
     clock: dict[str, Any],
@@ -352,35 +409,54 @@ def assemble_payload(
     """
     blocks: list[str] = []
 
-    def fits(candidate: str) -> bool:
+    def fits(candidate: str, reserve: int = 0) -> bool:
+        """Does ``candidate`` fit the per-event ceiling, keeping ``reserve``
+        characters free for what still has to be appended after it?"""
         if max_total_chars <= 0:
             return True
-        return len("\n\n".join([*blocks, candidate])) <= max_total_chars
+        return len("\n\n".join([*blocks, candidate])) + reserve <= max_total_chars
 
-    # Reserve room for the "(+N more)" summary while packing FULL blocks that
-    # still have candidates behind them — otherwise a derived-cap FULL can
-    # consume the whole budget and starve the index/summary (amendments 1+3
-    # would fight each other; measured: 10-spec fan-out at max_total_chars
-    # 3000 emitted one 3000-char FULL and dropped the other nine silently).
+    # Reserve while candidates are still pending: the index lines those
+    # candidates would actually need (true strings, not estimates) plus the
+    # summary line — so a derived-cap FULL cannot eat the budget and starve
+    # the specs behind it (measured: 10-spec fan-out at max_total_chars 3000
+    # emitted one 3000-char FULL and dropped the other nine silently). The
+    # named part is only guaranteed within INDEX_RESERVE_MAX_CHARS; beyond
+    # that the reserve falls back to the summary line alone.
+    _all_index_lines = [_index_line(m) for m in matches]
     _summary_upper = (
         f"- (+{len(matches)} more governing specs over budget — run "
-        f"get_context.py --mode spec --file {edited_rel} to list them)"
+        f"python3 ./.trellis/scripts/get_context.py --mode spec "
+        f"--file {edited_rel} to list them)"
     )
-    _reserve = len("\n\n" + _index_block([_summary_upper]))
+    _summary_reserve = len("\n\n" + _index_block([_summary_upper]))
 
-    def fits_reserved(candidate: str, more_after: bool) -> bool:
-        if max_total_chars <= 0:
-            return True
-        used = len("\n\n".join([*blocks, candidate]))
-        if more_after:
-            return used + _reserve <= max_total_chars
-        return used <= max_total_chars
+    def reserve_for(pending: Sequence[str]) -> int:
+        if not pending:
+            return 0  # Nothing can follow this block — nothing to reserve.
+        named = len("\n\n" + _index_block([*pending, _summary_upper]))
+        if named > INDEX_RESERVE_MAX_CHARS:
+            return _summary_reserve
+        return named
 
     index_lines: list[str] = []
     ticket_pending: list[tuple[str, str]] = []  # (spec_rel, sha256_hex)
     records: list[dict[str, Any]] = []
 
     for match_idx, match in enumerate(matches):
+        try:
+            size = match.spec_path.stat().st_size
+        except OSError:
+            size = 0
+        if size > MAX_SPEC_SOURCE_BYTES:
+            # Too big to read+hash, let alone inline: name it and move on.
+            _warn(
+                f"{match.rel_path} is {size} bytes (over "
+                f"{MAX_SPEC_SOURCE_BYTES}) — degraded to an index line"
+            )
+            index_lines.append(_index_line(match))
+            continue
+
         try:
             data = match.spec_path.read_bytes()
         except OSError:
@@ -400,12 +476,14 @@ def assemble_payload(
             ticket_pending.append((match.rel_path, sha256_hex))
             continue
 
-        more_after = match_idx < len(matches) - 1 or bool(index_lines)
-        _fits = (lambda c: fits_reserved(c, more_after))
+        pending = [*index_lines, *_all_index_lines[match_idx + 1 :]]
+        reserve = reserve_for(pending)
+        _fits = (lambda c: fits(c, reserve))
 
         text = data.decode("utf-8", errors="replace")
         body = truncate_chars(text, max_spec_chars)
-        if len(body) < len(text):
+        complete = len(body) >= len(text)
+        if not complete:
             body += truncation_notice(match.rel_path, max_spec_chars)
         block = render_full(edited_rel, match.rel_path, sha12, body)
         if not _fits(block):
@@ -419,18 +497,22 @@ def assemble_payload(
                 edited_rel, match.rel_path, sha12, text, max_spec_chars, _fits
             )
             if derived is not None:
-                blocks.append(derived)
+                derived_block, derived_complete = derived
+                blocks.append(derived_block)
                 records.append(
-                    make_record(match.rel_path, sha256_hex, "full", clock)
+                    make_record(
+                        match.rel_path, sha256_hex, "full", clock, derived_complete
+                    )
                 )
                 continue
             # No usable prefix fits — degrade to an index line, never drop
             # silently. Not recorded: stays eligible for a later event.
-            description = match.description or "no description"
-            index_lines.append(f"- {match.rel_path} — {description}")
+            index_lines.append(_index_line(match))
             continue
         blocks.append(block)
-        records.append(make_record(match.rel_path, sha256_hex, "full", clock))
+        records.append(
+            make_record(match.rel_path, sha256_hex, "full", clock, complete)
+        )
 
     if index_lines:
         # The index block is budget-bounded too: lines that do not fit collapse
@@ -449,9 +531,11 @@ def assemble_payload(
             # lines (re-counting them as dropped) until the summary fits —
             # only an absurdly small total budget can drop it entirely.
             while True:
+                noun = "spec" if dropped == 1 else "specs"
                 summary = (
-                    f"- (+{dropped} more governing specs over budget — run "
-                    f"get_context.py --mode spec --file {edited_rel} to list them)"
+                    f"- (+{dropped} more governing {noun} over budget — run "
+                    f"python3 ./.trellis/scripts/get_context.py --mode spec "
+                    f"--file {edited_rel} to list them)"
                 )
                 if fits(_index_block([*chosen, summary])):
                     chosen.append(summary)

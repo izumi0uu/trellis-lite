@@ -1,6 +1,12 @@
 /**
  * Integration tests for path-scoped on-demand spec injection (v2 ticket-refresh,
- * post-review contract R1–R7).
+ * post-review contract R1–R7, audit-fix contract F1–F13).
+ *
+ * Tests carrying an `F<n>:` prefix pin a fixed audit finding: F1 subagent
+ * beats, F2 collision-free identity, F3 the one canonical normalization, F4
+ * frontmatter robustness, F5 config-surface honesty, F6 named-index reserve +
+ * honest tickets, F7 GC containment, F8 fail-soft scan, F9 platform-neutral
+ * input, F10 state tie-break, F13 the §12-required cases.
  *
  * Covers four surfaces:
  *   - `src/templates/trellis/scripts/common/spec_match.py` — glob→regex
@@ -25,6 +31,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -160,6 +167,7 @@ from common.spec_inject import (
     render_full,
     render_ticket,
     scan_transcript,
+    select_beats,
     truncate_chars,
     truncation_notice,
     within_window,
@@ -348,6 +356,102 @@ const LINE = {
 
 function userTurns(count: number, tag = "t"): string[] {
   return Array.from({ length: count }, (_, i) => LINE.userTurn(`${tag}-${i}`));
+}
+
+// ---------------------------------------------------------------------------
+// F1: subagent transcript fixtures. Field sets mirror real Claude Code
+// subagent records (verified against ~/.claude/projects/*/*/subagents/*.jsonl
+// on this machine): every line carries `agentId` + `isSidechain: true`, the
+// prompt is the ONLY line with string `message.content`, tool results come
+// back as `type: "user"` lines with an ARRAY content, and the agent loop's
+// beat is the `type: "assistant"` line.
+// ---------------------------------------------------------------------------
+
+const SUB_LINE = {
+  /** The single real user turn a subagent transcript ever has: its prompt. */
+  prompt: (agentId: string, text: string): string =>
+    JSON.stringify({
+      parentUuid: null,
+      isSidechain: true,
+      promptId: "109383d9-6c43-44b8-b7ba-84a7ff838d8c",
+      agentId,
+      type: "user",
+      message: { role: "user", content: text },
+      uuid: "76afc8db-3082-466e-8af4-fb58f3e0e22a",
+      timestamp: "2026-07-17T15:09:58.480Z",
+      userType: "external",
+      entrypoint: "claude-desktop",
+      cwd: "/repo",
+      sessionId: "5f96bd1d-46a1-4148-9b48-1f18c4dfde94",
+      version: "2.1.209",
+      gitBranch: "main",
+    }),
+  /** One agent-loop iteration — the subagent's conversation beat. */
+  assistant: (agentId: string, i: number): string =>
+    JSON.stringify({
+      parentUuid: "76afc8db-3082-466e-8af4-fb58f3e0e22a",
+      isSidechain: true,
+      agentId,
+      message: {
+        model: "claude-fable-5",
+        id: `msg_011Cd7qovLZNoQ22JbMmrT${i}`,
+        type: "message",
+        role: "assistant",
+        content: [{ type: "tool_use", id: `toolu_${i}`, name: "Read", input: {} }],
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        usage: { input_tokens: 2, output_tokens: 340 },
+      },
+      requestId: `req_011Cd7qotALhtEpcVLnnx${i}`,
+      attributionAgent: "general-purpose",
+      type: "assistant",
+      uuid: `cd64e3d0-c581-418c-a311-c4ce67dbfb${i}`,
+      timestamp: "2026-07-17T15:10:03.930Z",
+      userType: "external",
+      entrypoint: "claude-desktop",
+      cwd: "/repo",
+      sessionId: "5f96bd1d-46a1-4148-9b48-1f18c4dfde94",
+      version: "2.1.209",
+      gitBranch: "main",
+    }),
+  /** A tool result: type=user with ARRAY content → never a real user turn. */
+  toolResult: (agentId: string, i: number): string =>
+    JSON.stringify({
+      parentUuid: `cd64e3d0-c581-418c-a311-c4ce67dbfb${i}`,
+      isSidechain: true,
+      promptId: "109383d9-6c43-44b8-b7ba-84a7ff838d8c",
+      agentId,
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            tool_use_id: `toolu_${i}`,
+            type: "tool_result",
+            content: "ok",
+            is_error: false,
+          },
+        ],
+      },
+      uuid: `92725496-ae8e-4745-947d-1a4ab43c46a${i}`,
+      sourceToolAssistantUUID: `cd64e3d0-c581-418c-a311-c4ce67dbfb${i}`,
+      timestamp: "2026-07-17T15:10:04.030Z",
+      userType: "external",
+      entrypoint: "claude-desktop",
+      cwd: "/repo",
+      sessionId: "5f96bd1d-46a1-4148-9b48-1f18c4dfde94",
+      version: "2.1.209",
+      gitBranch: "main",
+    }),
+};
+
+/** `count` agent-loop iterations (assistant line + its tool result), numbered
+ * from `from` so appended batches keep distinct uuids. */
+function subagentBeats(agentId: string, count: number, from = 0): string[] {
+  return Array.from({ length: count }, (_, i) => [
+    SUB_LINE.assistant(agentId, from + i),
+    SUB_LINE.toolResult(agentId, from + i),
+  ]).flat();
 }
 
 function writeTranscript(file: string, lines: string[]): void {
@@ -566,17 +670,148 @@ for g in ["/abs/path.ts", "a/../b.ts", "src\\\\win.ts", "", "src/app.ts"]:
       expect(r.stderr).toBe("");
     });
 
-    it("tolerates an unclosed frontmatter block: body prose is ignored, declared paths still apply", () => {
+    // F4: a frontmatter block that never closes cannot be distinguished from
+    // one whose closing marker sits past the head bound, so both warn + skip.
+    // Routing on a half-read `paths:` list is worse than skipping loudly.
+    it("F4: an unclosed frontmatter block warns and skips the file; siblings match", () => {
       writeSpec(
         tmp,
         "unclosed.md",
         "---\npaths:\n  - src/**\n\nSome body prose here.\n",
       );
+      writeSpec(tmp, "good.md", "---\npaths:\n  - src/**\n---\nBody\n");
 
       const r = runMatch(tmp, "src/app.ts");
       expect(r.status).toBe(0);
-      expect(r.stdout.trim()).toBe(".trellis/spec/unclosed.md|None");
+      expect(r.stdout.trim()).toBe(".trellis/spec/good.md|None");
+      expect(r.stderr).toContain(
+        "malformed frontmatter in .trellis/spec/unclosed.md",
+      );
+      expect(r.stderr).toContain("never closed within the head bound");
+    });
+
+    it("F4: the closing marker must land inside the 16 KiB / 200-line head bound", () => {
+      // 250 declared globs push the closing `---` past HEAD_MAX_LINES; a
+      // 150-glob sibling closes inside the bound and still parses whole.
+      const runaway = Array.from({ length: 250 }, (_, i) => `  - src/g${i}/**`);
+      const within = Array.from({ length: 150 }, (_, i) => `  - src/g${i}/**`);
+      writeSpec(
+        tmp,
+        "runaway.md",
+        ["---", "paths:", ...runaway, "---", "Body", ""].join("\n"),
+      );
+      writeSpec(
+        tmp,
+        "within.md",
+        ["---", "paths:", ...within, "---", "Body", ""].join("\n"),
+      );
+
+      const r = runMatch(tmp, "src/g149/app.ts");
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe(".trellis/spec/within.md|None");
+      expect(r.stderr).toContain(
+        "malformed frontmatter in .trellis/spec/runaway.md",
+      );
+      expect(r.stderr).toContain("never closed within the head bound");
+    });
+
+    it("F4: an opening `---` with no recognized key is a horizontal rule, not frontmatter", () => {
+      // Prose files that open with an `---` rule are not malformed, so they
+      // must stay silent — including the unterminated variant, which the
+      // no-recognized-key rule decides before the never-closed rule.
+      writeSpec(
+        tmp,
+        "prose.md",
+        [
+          "---",
+          "",
+          "A prose file that opens with a Markdown horizontal rule.",
+          "Note: this line even looks like a key, but is not a recognized one.",
+          "",
+          "---",
+          "",
+          "More prose.",
+          "",
+        ].join("\n"),
+      );
+      writeSpec(
+        tmp,
+        "prose-unterminated.md",
+        "---\nJust prose under a rule, never closed, no recognized key.\n",
+      );
+
+      const r = runMatch(tmp, "src/app.ts");
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe("");
       expect(r.stderr).toBe("");
+    });
+
+    it("F4: a `paths:` flow sequence parses like a block list", () => {
+      writeSpec(
+        tmp,
+        "flow.md",
+        '---\ndescription: flow spec\npaths: [src/app.ts, "src/commands/**"]\n---\nBody\n',
+      );
+
+      const first = runMatch(tmp, "src/app.ts");
+      expect(first.status).toBe(0);
+      expect(first.stdout.trim()).toBe(".trellis/spec/flow.md|flow spec");
+      expect(first.stderr).toBe("");
+
+      const second = runMatch(tmp, "src/commands/update.ts");
+      expect(second.status).toBe(0);
+      expect(second.stdout.trim()).toBe(".trellis/spec/flow.md|flow spec");
+    });
+
+    // §12-required parsing cases (F13).
+    it("F13 (§12): a UTF-8 BOM before the opening `---` is tolerated", () => {
+      writeSpec(
+        tmp,
+        "bom.md",
+        "\uFEFF---\ndescription: bom spec\npaths:\n  - src/**\n---\nBody\n",
+      );
+
+      const r = runMatch(tmp, "src/app.ts");
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe(".trellis/spec/bom.md|bom spec");
+      expect(r.stderr).toBe("");
+    });
+
+    it("F13 (§12): quotes and inline comments are stripped from values and globs", () => {
+      writeSpec(
+        tmp,
+        "quoted.md",
+        [
+          "---",
+          'name: "quoted-name"   # the name key',
+          "description: 'single quoted description'  # trailing comment",
+          "paths:",
+          '  - "src/**"   # only the glob survives',
+          "---",
+          "Body",
+          "",
+        ].join("\n"),
+      );
+
+      const r = runMatch(tmp, "src/app.ts");
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe(
+        ".trellis/spec/quoted.md|single quoted description",
+      );
+      expect(r.stderr).toBe("");
+    });
+
+    it("F13 (§12): a block-scalar `paths:` is malformed too (warn + skip)", () => {
+      writeSpec(tmp, "blockscalar.md", "---\npaths: >\n  src/**\n---\nBody\n");
+      writeSpec(tmp, "good.md", "---\npaths:\n  - src/**\n---\nBody\n");
+
+      const r = runMatch(tmp, "src/app.ts");
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe(".trellis/spec/good.md|None");
+      expect(r.stderr).toContain(
+        "malformed frontmatter in .trellis/spec/blockscalar.md",
+      );
+      expect(r.stderr).toContain("'paths' must be a list of globs");
     });
 
     it("still treats an inline-scalar `paths:` as malformed (warn + skip); siblings match", () => {
@@ -626,6 +861,91 @@ for g in ["/abs/path.ts", "a/../b.ts", "src\\\\win.ts", "", "src/app.ts"]:
       expect(r.stdout.trim()).toBe(".trellis/spec/mixed.md|None");
       expect(r.stderr).toContain("invalid glob");
       expect(r.stderr).toContain("/absolute/path.ts");
+    });
+  });
+
+  // ===========================================================================
+  // F3: one normalization — `normalize_repo_relative` is the canonical path
+  // used both for matching and for display
+  // ===========================================================================
+
+  describe("common/spec_match.py: canonical normalization (F3)", () => {
+    /** rel_path list + the canonical rel for (root, file), one per line. */
+    function probeNormalization(
+      pairs: [string, string][],
+    ): { status: number | null; stdout: string; stderr: string } {
+      return runSpecProbe(
+        tmp,
+        `
+from common.spec_match import normalize_repo_relative
+for root, f in ${JSON.stringify(pairs)}:
+    matched = match_specs_for_file(Path(root), f)
+    print(",".join(m.rel_path for m in matched) or "none")
+    print(normalize_repo_relative(Path(root), f))
+`,
+      );
+    }
+
+    it("kills symlink divergence on both sides (/var vs /private/var on macOS)", () => {
+      writeSpec(
+        tmp,
+        "cli/commands.md",
+        "---\npaths:\n  - src/commands/**\n---\nBody\n",
+      );
+      // The OS hands the hook whichever form the caller had: the raw temp path
+      // (a symlink on macOS) or its realpath. Root and file are resolved on
+      // both sides, so the four combinations collapse to one rel string.
+      const real = fs.realpathSync(tmp);
+      const rawFile = path.join(tmp, "src/commands/update.ts");
+      const realFile = path.join(real, "src/commands/update.ts");
+
+      const r = probeNormalization([
+        [tmp, realFile],
+        [real, rawFile],
+        [tmp, rawFile],
+        [real, realFile],
+      ]);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trim().split("\n")).toEqual([
+        ".trellis/spec/cli/commands.md",
+        "src/commands/update.ts",
+        ".trellis/spec/cli/commands.md",
+        "src/commands/update.ts",
+        ".trellis/spec/cli/commands.md",
+        "src/commands/update.ts",
+        ".trellis/spec/cli/commands.md",
+        "src/commands/update.ts",
+      ]);
+    });
+
+    it.skipIf(process.platform !== "darwin")(
+      "matches a case-variant path on case-insensitive filesystems (darwin)",
+      () => {
+        // APFS/HFS+ hand out whatever case the caller typed; the glob author
+        // wrote one case. Over-injecting is the safe side of the asymmetry.
+        writeSpec(
+          tmp,
+          "cli/commands.md",
+          "---\npaths:\n  - src/commands/**\n---\nBody\n",
+        );
+
+        const r = runMatch(tmp, "SRC/Commands/Update.ts");
+        expect(r.status).toBe(0);
+        expect(r.stdout.trim()).toBe(".trellis/spec/cli/commands.md|None");
+      },
+    );
+
+    it("NFC-normalizes the path so an NFD filename matches an NFC glob", () => {
+      // macOS hands out decomposed (NFD) filenames while the spec author types
+      // the composed (NFC) form — without normalization they are two strings.
+      const nfcGlob = "docs/caf\u00E9/**"; // composed
+      const nfdFile = "docs/cafe\u0301/notes.ts"; // decomposed
+      expect(nfdFile.normalize("NFC")).not.toBe(nfdFile);
+      writeSpec(tmp, "docs.md", `---\npaths:\n  - ${nfcGlob}\n---\nBody\n`);
+
+      const r = runMatch(tmp, nfdFile);
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe(".trellis/spec/docs.md|None");
     });
   });
 
@@ -787,12 +1107,13 @@ for budget in (0, 50, 120, 200, 300, 500, 800, 1200, 2000, 5000):
       expect(lines.filter((l) => l.includes("OVER"))).toEqual([]);
     });
 
-    it("scan_transcript counts real turns and compact boundaries only", () => {
+    it("scan_transcript returns all three counters (turns, assistant_turns, boundaries)", () => {
       const transcript = path.join(tmp, "scan.jsonl");
       writeTranscript(transcript, [
         ...userTurns(2),
         LINE.toolResult(),
         LINE.meta(),
+        LINE.assistant(),
         LINE.assistant(),
         LINE.compactBoundary(),
         "not json at all",
@@ -803,7 +1124,8 @@ for budget in (0, 50, 120, 200, 300, 500, 800, 1200, 2000, 5000):
         tmp,
         `
 counts = scan_transcript(${JSON.stringify(transcript)})
-print(f"turns={counts['turns']} boundaries={counts['boundaries']}")
+print(",".join(sorted(counts)))
+print(f"turns={counts['turns']} assistant={counts['assistant_turns']} boundaries={counts['boundaries']}")
 print("missing=%s" % scan_transcript("${path.join(tmp, "nope.jsonl").replace(/\\/g, "/")}"))
 print("empty-path=%s" % scan_transcript(""))
 print("none-path=%s" % scan_transcript(None))
@@ -812,11 +1134,66 @@ print("over-cap=%s" % scan_transcript(${JSON.stringify(transcript)}, max_bytes=1
       );
       expect(r.status, r.stderr).toBe(0);
       expect(r.stdout.trim().split("\n")).toEqual([
-        "turns=3 boundaries=1",
+        "assistant_turns,boundaries,turns",
+        "turns=3 assistant=2 boundaries=1",
         "missing=None",
         "empty-path=None",
         "none-path=None",
         "over-cap=None",
+      ]);
+    });
+
+    it("F1: select_beats reads assistant messages for a subagent, user turns for a main session", () => {
+      const r = runInjectProbe(
+        tmp,
+        `
+counts = {"turns": 1, "assistant_turns": 41, "boundaries": 0}
+print("main=%s" % select_beats(counts, False))
+print("subagent=%s" % select_beats(counts, True))
+print("no-transcript-main=%s" % select_beats(None, False))
+print("no-transcript-subagent=%s" % select_beats(None, True))
+`,
+      );
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trim().split("\n")).toEqual([
+        "main=1",
+        // A subagent transcript is frozen at its single prompt turn forever
+        // (verified against 60/60 real subagent transcripts on this machine),
+        // so its beats are the agent loop's assistant messages.
+        "subagent=41",
+        "no-transcript-main=None",
+        "no-transcript-subagent=None",
+      ]);
+    });
+
+    it("F8: hostile transcript content degrades the scan instead of raising", () => {
+      const transcript = path.join(tmp, "hostile.jsonl");
+      writeTranscript(transcript, [
+        ...userTurns(1),
+        // Carries the prefilter substring but parses to a str, not a record:
+        // the counters are decided on the PARSED value, never the substring.
+        JSON.stringify('{"type":"user"} pretending to be a record'),
+        // Same, as a list.
+        '[{"type":"assistant"}]',
+        // Unparseable line.
+        '{"type":"user", broken',
+        LINE.assistant(),
+      ]);
+
+      const r = runInjectProbe(
+        tmp,
+        `
+counts = scan_transcript(${JSON.stringify(transcript)})
+print(f"turns={counts['turns']} assistant={counts['assistant_turns']} boundaries={counts['boundaries']}")
+# An embedded NUL makes open() raise ValueError, not OSError: before F8 that
+# escaped scan_transcript and aborted the whole injection event.
+print("nul-path=%s" % scan_transcript("/tmp/tr\\x00.jsonl"))
+`,
+      );
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trim().split("\n")).toEqual([
+        "turns=1 assistant=1 boundaries=0",
+        "nul-path=None",
       ]);
     });
 
@@ -1152,37 +1529,39 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
       });
 
       it("degrades overflow matches to <spec-index> lines once max_total_chars is exhausted", () => {
+        // Contract property, not incidental split: when the budget is so
+        // tight that no usable body prefix fits (amendment 1), every match
+        // degrades to a NAMED index line — nothing is silently dropped and
+        // the ceiling still holds.
         writeSpec(
           tmp,
           "aa.md",
           "---\ndescription: first spec\npaths:\n  - src/app.ts\n---\n" +
-            "A".repeat(200) +
+            "A".repeat(2000) +
             "\n",
         );
         writeSpec(
           tmp,
           "bb.md",
           "---\ndescription: second spec\npaths:\n  - src/app.ts\n---\n" +
-            "B".repeat(200) +
+            "B".repeat(2000) +
             "\n",
         );
         writeConfig(tmp, [
           "spec_injection:",
           "  max_spec_chars: 0",
-          // Fits aa.md fully plus bb.md's NAMED index line (the index block is
-          // budget-counted too; the collapse-to-summary path has its own test).
-          "  max_total_chars: 500",
+          // Too small for any wrapper+notice+body prefix — both specs must
+          // fall through to named index lines (which do fit).
+          "  max_total_chars: 300",
         ]);
 
         const r = runHook(tmp, buildPayload(tmp, { filePath: "src/app.ts" }));
         expect(r.status).toBe(0);
         const ctx = additionalContext(r.stdout);
-        expect([...ctx].length).toBeLessThanOrEqual(500);
-        expect(ctx).toContain(
-          '<spec-context file="src/app.ts" spec=".trellis/spec/aa.md"',
-        );
-        expect(ctx).not.toContain('spec=".trellis/spec/bb.md"');
+        expect([...ctx].length).toBeLessThanOrEqual(300);
+        expect(ctx).not.toContain("<spec-context");
         expect(ctx).toContain("<spec-index>");
+        expect(ctx).toContain("- .trellis/spec/aa.md — first spec");
         expect(ctx).toContain("- .trellis/spec/bb.md — second spec");
         expect(ctx).toContain("</spec-index>");
       });
@@ -1215,7 +1594,7 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         expect([...ctx].length).toBeLessThanOrEqual(2000);
         expect(ctx).toContain("<spec-index>");
         expect(ctx).toMatch(
-          /- \(\+\d+ more governing specs over budget — run get_context\.py --mode spec --file src\/app\.ts to list them\)/,
+          /- \(\+\d+ more governing specs? over budget — run python3 \.\/\.trellis\/scripts\/get_context\.py --mode spec --file src\/app\.ts to list them\)/,
         );
         expect(ctx).toContain("</spec-index>");
       });
@@ -1245,15 +1624,18 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         expect([...ctx].length).toBeGreaterThan(9000);
       });
 
-      it("amendment 3: FULL packing reserves room so the (+N more) summary survives realistic short paths", () => {
+      it("amendment 3 / F6: FULL packing reserves room so every pending spec is still named", () => {
         // Greedy derived-cap packing used to eat the whole budget: one
-        // 3000-char FULL, nine specs silently gone. The reserve keeps the
-        // summary reachable with realistic (short-path) index lines.
-        for (let i = 0; i < 10; i++) {
+        // 3000-char FULL, nine specs silently gone. The reserve is now sized
+        // from the specs' OWN index lines, so the ones that do not fit as
+        // bodies are still named (the bare "(+N more)" summary is the
+        // fallback for when those named lines blow the reserve cap).
+        const specs = Array.from({ length: 10 }, (_, i) => `short-${i}.md`);
+        for (const name of specs) {
           writeSpec(
             tmp,
-            `short-${i}.md`,
-            `---\ndescription: rules ${i}\npaths:\n  - src/app.ts\n---\n` +
+            name,
+            `---\ndescription: rules ${name}\npaths:\n  - src/app.ts\n---\n` +
               "Y".repeat(2000) +
               "\n",
           );
@@ -1265,9 +1647,14 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         const ctx = additionalContext(r.stdout);
         expect([...ctx].length).toBeLessThanOrEqual(3000);
         expect(ctx).toContain("<spec-context");
-        expect(ctx).toMatch(
-          /- \(\+\d+ more governing specs over budget — run get_context\.py --mode spec --file src\/app\.ts to list them\)/,
+        // Not one spec is silently dropped: each is either taught in full or
+        // named in the index.
+        const accounted = specs.filter((name) =>
+          ctx.includes(`.trellis/spec/${name}`),
         );
+        expect(accounted).toEqual(specs);
+        // Plural-agnostic: the summary wording carries a dynamic plural.
+        expect(ctx).not.toMatch(/\(\+\d+ more governing spec/);
       });
     });
 
@@ -1384,14 +1771,19 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         );
       }
 
-      it("follows the subagent's own transcript, never the idle parent's", () => {
+      it("F1: beats tick on the subagent's assistant messages, never the idle parent", () => {
         writeGoverningSpec();
         writeConfig(tmp, ["spec_injection:", "  refresh_window_turns: 3"]);
 
         const parent = path.join(tmp, "sess.jsonl");
         const sub = subagentTranscript(parent, "sub7");
         writeTranscript(parent, userTurns(1, "p"));
-        writeTranscript(sub, userTurns(1, "s"));
+        // Real subagent shape: one string-content prompt line, then agent-loop
+        // iterations (assistant line + array-content tool_result line).
+        writeTranscript(sub, [
+          SUB_LINE.prompt("sub7", "Implement the thing."),
+          ...subagentBeats("sub7", 2),
+        ]);
 
         const payload = buildPayload(tmp, {
           filePath: EDITED,
@@ -1404,25 +1796,57 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         expect(additionalContext(first.stdout)).toContain(
           `<spec-context file="${EDITED}"`,
         );
-        expect(readShardRecords(soleShard(tmp))[0].turns).toBe(1);
+        // Two assistant beats — NOT the one frozen user prompt (a subagent's
+        // user turns never move, so they cannot measure the window).
+        expect(readShardRecords(soleShard(tmp))[0].turns).toBe(2);
 
         // The parent races ahead (50 real turns) while the subagent's own
         // context barely moved: reading the parent here would fire a spurious
         // refresh. The subagent clock keeps it silent.
         appendTranscript(parent, userTurns(50, "p2"));
+        // …and one more subagent beat stays inside the 3-beat window.
+        appendTranscript(sub, subagentBeats("sub7", 1, 2));
 
         const second = runHook(tmp, payload);
         expect(second.status).toBe(0);
         expect(second.stdout.trim()).toBe("");
 
         // Now the SUBAGENT crosses its own window → ticket.
-        appendTranscript(sub, userTurns(5, "s2"));
+        appendTranscript(sub, subagentBeats("sub7", 4, 3));
 
         const third = runHook(tmp, payload);
         expect(third.status).toBe(0);
         const ctx = additionalContext(third.stdout);
         expect(ctx).toContain(`<spec-ticket file="${EDITED}"`);
-        expect(readShardRecords(soleShard(tmp))[1].turns).toBe(6);
+        expect(readShardRecords(soleShard(tmp))[1].turns).toBe(7);
+      });
+
+      it("F1: a main-session transcript keeps ticking on user turns, not assistant lines", () => {
+        writeGoverningSpec();
+        writeConfig(tmp, ["spec_injection:", "  refresh_window_turns: 3"]);
+
+        const transcript = path.join(tmp, "sess.jsonl");
+        writeTranscript(transcript, userTurns(1, "a"));
+        // No agent_id → main-session semantics, unchanged by F1.
+        const payload = buildPayload(tmp, {
+          filePath: EDITED,
+          transcriptPath: transcript,
+        });
+
+        expect(runHook(tmp, payload).status).toBe(0);
+        expect(readShardRecords(soleShard(tmp))[0].turns).toBe(1);
+
+        // Ten assistant messages would be ten beats for a subagent; here they
+        // are not turns at all, so the window has not moved.
+        appendTranscript(
+          transcript,
+          Array.from({ length: 10 }, () => LINE.assistant()),
+        );
+
+        const second = runHook(tmp, payload);
+        expect(second.status).toBe(0);
+        expect(second.stdout.trim()).toBe("");
+        expect(readShardRecords(soleShard(tmp)).length).toBe(1);
       });
 
       it("falls back to the wall clock when the derived subagent transcript is absent", () => {
@@ -1641,6 +2065,497 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         expect(r.status).toBe(0);
         expect(fs.existsSync(agedShard)).toBe(true);
       });
+
+      it("F7: a symlinked project dir cannot walk the GC out of its own base", () => {
+        writeGoverningSpec();
+
+        const base = stateBase(tmp);
+        fs.mkdirSync(base, { recursive: true });
+        // A directory OUTSIDE the state base holding a file whose name and age
+        // both qualify for pruning — reachable only through a planted symlink
+        // that wears a conforming <project16> name.
+        const outside = path.join(tmp, "someone-elses-data");
+        fs.mkdirSync(outside, { recursive: true });
+        const victim = path.join(outside, "session_victim.jsonl");
+        fs.writeFileSync(victim, '{"v":2,"spec":"x"}\n', "utf-8");
+        const aged = new Date(Date.now() - 72 * 3600 * 1000);
+        fs.utimesSync(victim, aged, aged);
+        fs.symlinkSync(outside, path.join(base, "0123456789abcdef"), "dir");
+
+        // A same-depth directory with a foreign name is skipped by the name
+        // gate even though its shard would otherwise qualify.
+        const foreignDir = path.join(base, "not-a-project-dir");
+        fs.mkdirSync(foreignDir, { recursive: true });
+        const foreignShard = path.join(foreignDir, "session_old.jsonl");
+        fs.writeFileSync(foreignShard, '{"v":2,"spec":"x"}\n', "utf-8");
+        fs.utimesSync(foreignShard, aged, aged);
+
+        const lastGc = path.join(base, ".last-gc");
+        fs.writeFileSync(lastGc, "", "utf-8");
+        const hoursAgo = new Date(Date.now() - 2 * 3600 * 1000);
+        fs.utimesSync(lastGc, hoursAgo, hoursAgo);
+
+        const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED }));
+        expect(r.status).toBe(0);
+        expect(additionalContext(r.stdout)).toContain("<spec-context");
+
+        expect(fs.existsSync(victim)).toBe(true);
+        expect(fs.existsSync(foreignShard)).toBe(true);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // F2: identity sanitization is injective — a collision that MISSES an
+    // injection is the unacceptable failure
+    // -----------------------------------------------------------------------
+
+    describe("F2: collision-free identity", () => {
+      function shardNames(): string[] {
+        return listJsonl(stateBase(tmp))
+          .map((s) => path.basename(s))
+          .sort();
+      }
+
+      it("session ids that differ only past the 80-char head get distinct shards", () => {
+        writeGoverningSpec();
+        const shared = "x".repeat(130);
+
+        for (const session of [`${shared}-alpha`, `${shared}-beta`]) {
+          const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED, session }));
+          expect(r.status).toBe(0);
+          // Each is a first sight for its own identity → full teach.
+          expect(additionalContext(r.stdout)).toContain("<spec-context");
+        }
+
+        const names = shardNames();
+        expect(names.length).toBe(2);
+        // Readable 80-character head + "-" + 8 hex of sha256(raw key): the
+        // suffix is what keeps the mapping injective past the head.
+        for (const name of names) {
+          expect(name).toMatch(/^session_x{72}-[0-9a-f]{8}\.jsonl$/);
+        }
+        expect(names[0]).not.toBe(names[1]);
+      });
+
+      it("session ids that sanitize to the same head ('a.b' vs 'a_b') get distinct shards", () => {
+        writeGoverningSpec();
+
+        for (const session of ["a.b", "a_b"]) {
+          const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED, session }));
+          expect(r.status).toBe(0);
+          expect(additionalContext(r.stdout)).toContain("<spec-context");
+        }
+
+        // The resolver hands the hook "session_<id>"; "." is outside the
+        // filename-safe class and is replaced, which arms the hash suffix.
+        const digest = createHash("sha256")
+          .update("session_a.b")
+          .digest("hex")
+          .slice(0, 8);
+        expect(shardNames()).toEqual([
+          `session_a-b-${digest}.jsonl`,
+          "session_a_b.jsonl",
+        ]);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // F3: the canonical repo-relative path, end to end through the payload
+    // -----------------------------------------------------------------------
+
+    describe("F3: one normalization (hook payload)", () => {
+      it("accepts a realpath-form file_path while cwd is the raw symlinked path", () => {
+        writeGoverningSpec();
+        // Claude Code reports whichever form the tool call carried; on macOS
+        // the temp root is reached through /var → /private/var. Matching and
+        // the displayed `file=` attr must agree either way.
+        const realFile = path.join(fs.realpathSync(tmp), EDITED);
+        const payload = JSON.stringify({
+          hook_event_name: "PostToolUse",
+          cwd: tmp,
+          tool_name: "Edit",
+          tool_input: { file_path: realFile },
+          session_id: "sess-real",
+        });
+
+        const r = runHook(tmp, payload);
+        expect(r.status).toBe(0);
+        const ctx = additionalContext(r.stdout);
+        expect(ctx).toContain(
+          `<spec-context file="${EDITED}" spec="${SPEC_REL}" sha256="`,
+        );
+        expect(ctx).toContain("Command spec body.");
+      });
+
+      it.skipIf(process.platform !== "darwin")(
+        "matches a case-variant payload path on darwin",
+        () => {
+          writeGoverningSpec();
+          const variant = "SRC/Commands/Update.ts";
+
+          const r = runHook(tmp, buildPayload(tmp, { filePath: variant }));
+          expect(r.status).toBe(0);
+          const ctx = additionalContext(r.stdout);
+          expect(ctx).toContain(
+            `<spec-context file="${variant}" spec="${SPEC_REL}" sha256="`,
+          );
+        },
+      );
+    });
+
+    // -----------------------------------------------------------------------
+    // F5: config surface honesty
+    // -----------------------------------------------------------------------
+
+    describe("F5: config surface", () => {
+      it("tools: [] disables every trigger (no output, no state)", () => {
+        writeGoverningSpec();
+        writeConfig(tmp, ["spec_injection:", "  tools: []"]);
+
+        for (const toolName of ["Edit", "Read", "Write", "MultiEdit"]) {
+          const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED, toolName }));
+          expect(r.status).toBe(0);
+          expect(r.stdout.trim()).toBe("");
+        }
+        expect(listJsonl(stateBase(tmp))).toEqual([]);
+      });
+
+      it("a flow-sequence tools list works, and an unknown name warns without breaking the known ones", () => {
+        writeGoverningSpec();
+        writeConfig(tmp, ["spec_injection:", "  tools: [Edit, Frobnicate]"]);
+
+        const edit = runHook(tmp, buildPayload(tmp, { filePath: EDITED }));
+        expect(edit.status).toBe(0);
+        expect(additionalContext(edit.stdout)).toContain("<spec-context");
+        expect(edit.stderr).toContain(
+          "unknown spec_injection.tools entries ['Frobnicate']",
+        );
+
+        // Read is not in the list → still silent.
+        const read = runHook(
+          tmp,
+          buildPayload(tmp, { filePath: EDITED, toolName: "Read", session: "s2" }),
+        );
+        expect(read.status).toBe(0);
+        expect(read.stdout.trim()).toBe("");
+      });
+
+      it("max_spec_chars: 0 means unlimited — the whole body, and the whole remaining budget", () => {
+        const header = "---\ndescription: big spec\npaths:\n  - src/app.ts\n---\n";
+        const content = header + "R".repeat(30000) + "\n";
+        writeSpec(tmp, "big.md", content);
+
+        // No per-spec cap and no per-event cap → the body lands whole.
+        writeConfig(tmp, [
+          "spec_injection:",
+          "  max_spec_chars: 0",
+          "  max_total_chars: 0",
+        ]);
+        const unlimited = runHook(tmp, buildPayload(tmp, { filePath: "src/app.ts" }));
+        expect(unlimited.status).toBe(0);
+        const unlimitedCtx = additionalContext(unlimited.stdout);
+        expect(fullBlockBody(unlimitedCtx)).toBe(content);
+        expect(unlimitedCtx).not.toContain("[Trellis: truncated at");
+
+        // With a per-event ceiling still set, "unlimited" must derive a body
+        // that FILLS that ceiling — the pre-F5 search ceiling of 1 collapsed
+        // this to a ~180-character payload.
+        writeConfig(tmp, ["spec_injection:", "  max_spec_chars: 0"]);
+        const capped = runHook(
+          tmp,
+          buildPayload(tmp, { filePath: "src/app.ts", session: "s2" }),
+        );
+        expect(capped.status).toBe(0);
+        const cappedCtx = additionalContext(capped.stdout);
+        expect([...cappedCtx].length).toBe(9500);
+        expect(cappedCtx).toContain("[Trellis: truncated at");
+      });
+
+      it("a spec over MAX_SPEC_SOURCE_BYTES degrades to an index line with a warn", () => {
+        // 10 MiB+ of spec is never inlinable; reading and hashing it on every
+        // tool event is the cost the bound exists to refuse.
+        const header = "---\ndescription: huge spec\npaths:\n  - src/app.ts\n---\n";
+        const abs = writeSpec(tmp, "huge.md", header);
+        fs.appendFileSync(abs, Buffer.alloc(11 * 1024 * 1024, 0x48));
+        expect(fs.statSync(abs).size).toBeGreaterThan(10 * 1024 * 1024);
+
+        const r = runHook(tmp, buildPayload(tmp, { filePath: "src/app.ts" }));
+        expect(r.status).toBe(0);
+        expect(additionalContext(r.stdout)).toBe(
+          "<spec-index>\n- .trellis/spec/huge.md — huge spec\n</spec-index>",
+        );
+        expect(r.stderr).toMatch(
+          /\.trellis\/spec\/huge\.md is \d+ bytes \(over 10485760\) — degraded to an index line/,
+        );
+        // Nothing was recorded: the spec stays eligible for a real teach.
+        expect(readShardRecords(soleShard(tmp))).toEqual([]);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // F6: named-index reserve + honest tickets
+    // -----------------------------------------------------------------------
+
+    describe("F6: budget honesty", () => {
+      /** Realistic spec shapes: real repo-length rel paths and descriptions. */
+      const REALISTIC: [string, string][] = [
+        ["cli/backend/commands-workflow.md", "workflow command conventions"],
+        ["cli/backend/script-conventions.md", "python script conventions"],
+        ["cli/backend/spec-injection.md", "path-scoped spec injection"],
+        ["cli/backend/error-handling.md", "hook error handling rules"],
+        ["cli/backend/filesystem-safety.md", "filesystem safety rules"],
+      ];
+
+      it("names the specs it could not inline instead of collapsing to a bare count", () => {
+        const edited = "packages/cli/src/commands/workflow.ts";
+        for (const [rel, description] of REALISTIC) {
+          writeSpec(
+            tmp,
+            rel,
+            `---\ndescription: ${description}\npaths:\n  - ${edited}\n---\n` +
+              "W".repeat(8000) +
+              "\n",
+          );
+        }
+
+        // Defaults (9400 / 9500) — no config at all.
+        const r = runHook(tmp, buildPayload(tmp, { filePath: edited }));
+        expect(r.status).toBe(0);
+        const ctx = additionalContext(r.stdout);
+        expect([...ctx].length).toBeLessThanOrEqual(9500);
+
+        const taught = REALISTIC.filter(([rel]) =>
+          ctx.includes(`spec=".trellis/spec/${rel}" sha256=`),
+        );
+        const named = REALISTIC.filter(([rel, description]) =>
+          ctx.includes(`- .trellis/spec/${rel} — ${description}`),
+        );
+        // The split between taught and named is budget-derived (it moves with
+        // the wrapper cost), so only the partition is pinned: every spec is
+        // accounted for exactly once, and the overflow ones are NAMED — the
+        // pre-F6 reserve degraded all of them to one anonymous count.
+        expect([...taught, ...named].map(([rel]) => rel).sort()).toEqual(
+          REALISTIC.map(([rel]) => rel).sort(),
+        );
+        expect(named.length).toBeGreaterThan(0);
+        // Plural-agnostic: the summary wording carries a dynamic plural.
+        expect(ctx).not.toMatch(/\(\+\d+ more governing spec/);
+      });
+
+      it("a truncated FULL is recorded incomplete and re-taught, never ticketed as if shown whole", () => {
+        // "You were shown this spec earlier" must never be a lie: the agent
+        // only ever saw a prefix of this spec.
+        writeSpec(
+          tmp,
+          "cli/commands.md",
+          "---\ndescription: big command spec\npaths:\n  - src/commands/**\n---\n" +
+            "R".repeat(30000) +
+            "\n",
+        );
+        writeConfig(tmp, ["spec_injection:", "  refresh_window_turns: 3"]);
+
+        const transcript = path.join(tmp, "sess.jsonl");
+        writeTranscript(transcript, userTurns(1, "a"));
+        const payload = buildPayload(tmp, {
+          filePath: EDITED,
+          transcriptPath: transcript,
+        });
+
+        const first = runHook(tmp, payload);
+        expect(first.status).toBe(0);
+        const firstCtx = additionalContext(first.stdout);
+        expect(firstCtx).toContain("[Trellis: truncated at");
+        const record = readShardRecords(soleShard(tmp))[0] as StateRecord & {
+          complete?: boolean;
+        };
+        expect(record.mode).toBe("full");
+        expect(record.complete).toBe(false);
+
+        // Past the window: an unqualified ticket would claim prior exposure to
+        // a body the agent never saw, so the spec is taught again instead.
+        appendTranscript(transcript, userTurns(4, "b"));
+
+        const second = runHook(tmp, payload);
+        expect(second.status).toBe(0);
+        const secondCtx = additionalContext(second.stdout);
+        expect(secondCtx).toContain(`<spec-context file="${EDITED}"`);
+        expect(secondCtx).not.toContain("<spec-ticket");
+        expect(secondCtx).not.toContain("shown this spec earlier");
+      });
+
+      it("a body cut by max_spec_chars alone is recorded incomplete too", () => {
+        writeSpec(
+          tmp,
+          "cli/commands.md",
+          "---\ndescription: capped\npaths:\n  - src/commands/**\n---\n" +
+            "R".repeat(3000) +
+            "\n",
+        );
+        writeConfig(tmp, ["spec_injection:", "  max_spec_chars: 200"]);
+
+        const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED }));
+        expect(r.status).toBe(0);
+        expect(additionalContext(r.stdout)).toContain("[Trellis: truncated at");
+        const record = readShardRecords(soleShard(tmp))[0] as StateRecord & {
+          complete?: boolean;
+        };
+        expect(record.complete).toBe(false);
+      });
+
+      it("a whole body records no completeness flag (absent means complete)", () => {
+        writeGoverningSpec();
+
+        const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED }));
+        expect(r.status).toBe(0);
+        expect(additionalContext(r.stdout)).not.toContain("truncated at");
+        expect(
+          Object.keys(readShardRecords(soleShard(tmp))[0]),
+        ).not.toContain("complete");
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // F8 / F9 / F10: fail-soft scan, platform-neutral input, state tie-break
+    // -----------------------------------------------------------------------
+
+    describe("F8: a hostile transcript never aborts the event", () => {
+      it("degrades to the wall clock and still injects", () => {
+        writeGoverningSpec();
+        // An embedded NUL makes open() raise ValueError — not OSError — from
+        // inside the scan. Before F8 that escaped and killed the whole event
+        // (no injection at all); now it degrades to the wall clock.
+        const hostile = path.join(tmp, "sess\u0000.jsonl");
+
+        const r = runHook(
+          tmp,
+          buildPayload(tmp, { filePath: EDITED, transcriptPath: hostile }),
+        );
+        expect(r.status).toBe(0);
+        expect(additionalContext(r.stdout)).toContain(
+          `<spec-context file="${EDITED}"`,
+        );
+
+        const record = readShardRecords(soleShard(tmp))[0];
+        expect(record.turns).toBeNull();
+        expect(record.boundaries).toBeNull();
+      });
+
+      it("keeps counting around lines that parse to something other than a record", () => {
+        writeGoverningSpec();
+        writeConfig(tmp, ["spec_injection:", "  refresh_window_turns: 2"]);
+
+        const transcript = path.join(tmp, "sess.jsonl");
+        writeTranscript(transcript, [
+          ...userTurns(1, "a"),
+          JSON.stringify('{"type":"user"} pretending to be a record'),
+          '{"type":"user", broken',
+        ]);
+        const payload = buildPayload(tmp, {
+          filePath: EDITED,
+          transcriptPath: transcript,
+        });
+
+        const first = runHook(tmp, payload);
+        expect(first.status).toBe(0);
+        expect(additionalContext(first.stdout)).toContain("<spec-context");
+        // Only the one real turn counted; the impostor lines did not.
+        expect(readShardRecords(soleShard(tmp))[0].turns).toBe(1);
+      });
+    });
+
+    describe("F9: platform-neutral input", () => {
+      it("accepts a camelCase toolInput payload (sibling-hook parity)", () => {
+        writeGoverningSpec();
+        const payload = JSON.stringify({
+          hook_event_name: "PostToolUse",
+          cwd: tmp,
+          toolName: "Edit",
+          toolInput: { file_path: EDITED },
+          session_id: "camel-1",
+        });
+
+        const r = runHook(tmp, payload);
+        expect(r.status).toBe(0);
+        expect(additionalContext(r.stdout)).toContain(
+          `<spec-context file="${EDITED}" spec="${SPEC_REL}" sha256="`,
+        );
+      });
+
+      it("reconfigures stderr alongside stdin/stdout on Windows (six-hook parity)", () => {
+        // Static assertion: the Windows branch cannot run on this platform,
+        // but a warning printed through an un-reconfigured stderr raises
+        // UnicodeEncodeError on a non-UTF-8 codepage.
+        const source = fs.readFileSync(HOOK_PATH, "utf-8");
+        expect(source).toContain('for _stream_name in ("stdin", "stdout", "stderr"):');
+      });
+    });
+
+    describe("F10: state tie-break", () => {
+      it("on an equal ts the LATER record wins (appends are ordered)", () => {
+        writeGoverningSpec();
+        const payload = buildPayload(tmp, { filePath: EDITED });
+
+        expect(runHook(tmp, payload).status).toBe(0);
+        const shard = soleShard(tmp);
+        const record = readShardRecords(shard)[0];
+        // Same ts, different sha: the later line is the newer truth, so the
+        // spec must look CHANGED and be re-taught.
+        const superseding = { ...record, sha256: "0".repeat(64) };
+        fs.writeFileSync(
+          shard,
+          JSON.stringify(record) + "\n" + JSON.stringify(superseding) + "\n",
+          "utf-8",
+        );
+
+        const second = runHook(tmp, payload);
+        expect(second.status).toBe(0);
+        expect(additionalContext(second.stdout)).toContain(
+          `<spec-context file="${EDITED}"`,
+        );
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // F13: §12-required hook cases
+    // -----------------------------------------------------------------------
+
+    describe("F13 (§12): fast-exit paths", () => {
+      it("a payload without file_path emits nothing", () => {
+        writeGoverningSpec();
+        const payload = JSON.stringify({
+          hook_event_name: "PostToolUse",
+          cwd: tmp,
+          tool_name: "Edit",
+          tool_input: { content: "no path here" },
+          session_id: "sess-1",
+        });
+
+        const r = runHook(tmp, payload);
+        expect(r.status).toBe(0);
+        expect(r.stdout.trim()).toBe("");
+        expect(listJsonl(stateBase(tmp))).toEqual([]);
+      });
+
+      it("a cwd with no .trellis anywhere above it emits nothing", () => {
+        writeGoverningSpec();
+        const outside = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-no-root-"));
+        try {
+          const payload = JSON.stringify({
+            hook_event_name: "PostToolUse",
+            cwd: outside,
+            tool_name: "Edit",
+            tool_input: { file_path: path.join(outside, EDITED) },
+            session_id: "sess-1",
+          });
+
+          const r = runHook(tmp, payload);
+          expect(r.status).toBe(0);
+          expect(r.stdout.trim()).toBe("");
+          expect(listJsonl(stateBase(tmp))).toEqual([]);
+        } finally {
+          fs.rmSync(outside, { recursive: true, force: true });
+        }
+      });
     });
   });
 
@@ -1664,6 +2579,29 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         ".trellis/spec/cli/commands.md — command conventions",
         ".trellis/spec/zz.md — (no description)",
       ]);
+    });
+
+    it("F13 (§12): dogfoods this repo's own frontmatter for commands/workflow.ts", () => {
+      // Runs against the REPO itself (not a fixture): the mapping documented in
+      // commands-workflow.md's own `paths:` must actually resolve through the
+      // shipped scanner. If that spec's frontmatter is dropped or renamed, the
+      // pull mode this test drives is the user-visible symptom.
+      const repoRoot = path.resolve(__dirname, "../../../..");
+      const r = spawnSync(
+        "python3",
+        [
+          path.join(repoRoot, ".trellis", "scripts", "get_context.py"),
+          "--mode",
+          "spec",
+          "--file",
+          "packages/cli/src/commands/workflow.ts",
+        ],
+        { cwd: repoRoot, encoding: "utf-8" },
+      );
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toContain(
+        ".trellis/spec/cli/backend/commands-workflow.md — ",
+      );
     });
 
     it("prints the no-match sentence when nothing matches", () => {
