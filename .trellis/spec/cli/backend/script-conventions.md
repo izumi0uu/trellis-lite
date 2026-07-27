@@ -518,6 +518,9 @@ a `.current-task` fallback or a Python hook directory.
 - Good: a Codex shell has a new thread id while exactly one older session file
   supplies the active task; `finish` reports `session-fallback:<old-key>` and
   deletes that old file.
+- Good: the exact session file is empty or malformed while another session
+  exists; `finish` reports no current task and preserves both files because no
+  unique active task was resolved.
 - Base: A normal shell command has no session env; `task.py create` creates the
   task without `.runtime`, and `task.py start` degrades with a session identity
   hint instead of writing `.current-task`.
@@ -542,8 +545,9 @@ a `.current-task` fallback or a Python hook directory.
 - Stale session tests proving no `.current-task` fallback occurs when the session task
   path is stale.
 - Finish regression tests for exact-match deletion, sole-fallback deletion,
-  and ambiguous multi-session no-op behavior. Exact-match coverage must prove a
-  sibling session for the same task remains untouched.
+  ambiguous multi-session no-op behavior, and malformed/empty exact-session
+  no-op behavior. Exact-match coverage must prove a sibling session for the
+  same task remains untouched.
 
 ##### 7. Wrong vs Correct
 

@@ -618,7 +618,7 @@ def clear_active_task(
         return ActiveTask(None, "none")
 
     previous = resolve_active_task(repo_root, platform_input, platform)
-    if not previous.context_key:
+    if not previous.task_path or not previous.context_key:
         return previous
 
     context_path = _context_path(repo_root, previous.context_key)

@@ -4025,6 +4025,44 @@ print(json.dumps({
     );
   });
 
+  it("[issue #469] finish preserves a malformed exact session when another session exists", () => {
+    setupTaskRepo();
+    writeProjectFile(
+      path.join(
+        ".trellis",
+        ".runtime",
+        "sessions",
+        "codex_malformed.json",
+      ),
+      "{",
+    );
+    writeSessionContext("codex_other", ".trellis/tasks/issue-106");
+    const taskScriptPath = path.join(tmpDir, ".trellis", "scripts", "task.py");
+    const sessionsDir = path.join(
+      tmpDir,
+      ".trellis",
+      ".runtime",
+      "sessions",
+    );
+
+    const output = execSync(
+      `${pythonCmd} ${JSON.stringify(taskScriptPath)} finish`,
+      {
+        cwd: tmpDir,
+        encoding: "utf-8",
+        env: sessionEnv({ CODEX_THREAD_ID: "malformed" }),
+      },
+    );
+
+    expect(output).toContain("No current task set");
+    expect(fs.existsSync(path.join(sessionsDir, "codex_malformed.json"))).toBe(
+      true,
+    );
+    expect(fs.existsSync(path.join(sessionsDir, "codex_other.json"))).toBe(
+      true,
+    );
+  });
+
   // ------------------------------------------------------------
   // inject-workflow-state.py hook (workflow-enforcement-v2)
   // ------------------------------------------------------------
