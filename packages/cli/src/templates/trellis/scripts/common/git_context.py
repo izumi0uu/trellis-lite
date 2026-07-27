@@ -105,7 +105,24 @@ def main() -> None:
         if not args.file:
             parser.error("--file is required with --mode spec")
         matches = match_specs_for_file(get_repo_root(), args.file)
-        if matches:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "file": args.file,
+                        "matches": [
+                            {
+                                "path": match.rel_path,
+                                "description": match.description,
+                            }
+                            for match in matches
+                        ],
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+        elif matches:
             for match in matches:
                 print(f"{match.rel_path} — {match.description or '(no description)'}")
         else:

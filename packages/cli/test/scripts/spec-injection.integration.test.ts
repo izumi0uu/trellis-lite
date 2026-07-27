@@ -2260,5 +2260,49 @@ print(f"v={rec['v']} version={STATE_VERSION} reset={rec['reset']}")
         "No spec files declare paths matching src/nomatch.ts.",
       );
     });
+
+    it("returns structured JSON for matches and no matches", () => {
+      writeSpec(
+        tmp,
+        "cli/commands.md",
+        "---\ndescription: command conventions\npaths:\n  - src/commands/**\n---\nBody\n",
+      );
+      writeSpec(tmp, "zz.md", "---\npaths:\n  - src/**\n---\nBody\n");
+
+      const matched = runGetContext(tmp, [
+        "--mode",
+        "spec",
+        "--file",
+        "src/commands/update.ts",
+        "--json",
+      ]);
+      expect(matched.status).toBe(0);
+      expect(JSON.parse(matched.stdout)).toEqual({
+        file: "src/commands/update.ts",
+        matches: [
+          {
+            path: ".trellis/spec/cli/commands.md",
+            description: "command conventions",
+          },
+          {
+            path: ".trellis/spec/zz.md",
+            description: null,
+          },
+        ],
+      });
+
+      const unmatched = runGetContext(tmp, [
+        "--mode",
+        "spec",
+        "--file",
+        "outside.txt",
+        "--json",
+      ]);
+      expect(unmatched.status).toBe(0);
+      expect(JSON.parse(unmatched.stdout)).toEqual({
+        file: "outside.txt",
+        matches: [],
+      });
+    });
   });
 });

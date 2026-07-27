@@ -3,9 +3,12 @@ name: spec-injection
 description: Path-scoped on-demand spec injection — frontmatter contract, glob matching, hook flow, budgets, ticket-refresh state machine, identity ladder, platform matrix
 paths:
   - packages/cli/src/templates/shared-hooks/inject-spec-context.py
+  - packages/cli/src/templates/trellis/scripts/common/git_context.py
   - packages/cli/src/templates/trellis/scripts/common/spec_match.py
   - packages/cli/src/templates/trellis/scripts/common/spec_inject.py
+  - packages/cli/test/scripts/spec-injection.integration.test.ts
   - .claude/hooks/inject-spec-context.py
+  - .trellis/scripts/common/git_context.py
   - .trellis/scripts/common/spec_match.py
   - .trellis/scripts/common/spec_inject.py
 ---
@@ -27,16 +30,16 @@ paths:
 
 ## Code map
 
-| Surface | File |
-|---|---|
-| Matching engine | `packages/cli/src/templates/trellis/scripts/common/spec_match.py` (live twin `.trellis/scripts/common/spec_match.py`) |
-| Decision engine (pure logic) | `packages/cli/src/templates/trellis/scripts/common/spec_inject.py` (live twin `.trellis/scripts/common/spec_inject.py`) |
-| Injection hook (IO shell) | `packages/cli/src/templates/shared-hooks/inject-spec-context.py` (live twin `.claude/hooks/inject-spec-context.py`) |
-| Registration | `packages/cli/src/templates/claude/settings.json` `PostToolUse` (live twin `.claude/settings.json`) |
-| Distribution | `packages/cli/src/templates/shared-hooks/index.ts` `SHARED_HOOKS_BY_PLATFORM` (claude only this iteration) |
-| Config | `spec_injection:` section of `.trellis/config.yaml` — shipped commented-out (defaults apply) in both the template (`templates/trellis/config.yaml`) and this repo's live config |
-| Pull mode | `get_context.py --mode spec --file <path>` (dispatch in `common/git_context.py`) |
-| Refresh state | `${TRELLIS_SPEC_STATE_DIR:-~/.trellis/spec-inject}/<project16>/<identity>.jsonl` (user-global, outside the repo) |
+| Surface                      | File                                                                                                                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Matching engine              | `packages/cli/src/templates/trellis/scripts/common/spec_match.py` (live twin `.trellis/scripts/common/spec_match.py`)                                                           |
+| Decision engine (pure logic) | `packages/cli/src/templates/trellis/scripts/common/spec_inject.py` (live twin `.trellis/scripts/common/spec_inject.py`)                                                         |
+| Injection hook (IO shell)    | `packages/cli/src/templates/shared-hooks/inject-spec-context.py` (live twin `.claude/hooks/inject-spec-context.py`)                                                             |
+| Registration                 | `packages/cli/src/templates/claude/settings.json` `PostToolUse` (live twin `.claude/settings.json`)                                                                             |
+| Distribution                 | `packages/cli/src/templates/shared-hooks/index.ts` `SHARED_HOOKS_BY_PLATFORM` (claude only this iteration)                                                                      |
+| Config                       | `spec_injection:` section of `.trellis/config.yaml` — shipped commented-out (defaults apply) in both the template (`templates/trellis/config.yaml`) and this repo's live config |
+| Pull mode                    | `get_context.py --mode spec --file <path>` (dispatch in `common/git_context.py`)                                                                                                |
+| Refresh state                | `${TRELLIS_SPEC_STATE_DIR:-~/.trellis/spec-inject}/<project16>/<identity>.jsonl` (user-global, outside the repo)                                                                |
 
 ---
 
@@ -102,13 +105,13 @@ skips that spec with a `[WARN] spec_match:` line on stderr — **only** for:
 or meaningless is rejected — with a stderr warning, without discarding the
 spec's other globs:
 
-| Rejection | Rule |
-|---|---|
-| empty glob | must be non-empty |
-| absolute | no leading `/`; globs are repo-relative |
-| traversal | no `..` segments |
-| backslash | no `\` — write POSIX separators even on Windows |
-| control chars | no `\x00`–`\x1f` / `\x7f` |
+| Rejection     | Rule                                            |
+| ------------- | ----------------------------------------------- |
+| empty glob    | must be non-empty                               |
+| absolute      | no leading `/`; globs are repo-relative         |
+| traversal     | no `..` segments                                |
+| backslash     | no `\` — write POSIX separators even on Windows |
+| control chars | no `\x00`–`\x1f` / `\x7f`                       |
 
 Everything else is valid: `@scope`, `[slug]`, `(marketing)`, non-ASCII
 directory names are all legal paths in real repositories and translate fine
@@ -122,26 +125,26 @@ Globs are matched against the edited file's **repo-relative POSIX path** with
 an anchored full match (`^…$`). Translation is deterministic, segment-based
 (`glob_to_regex()`):
 
-| Token | Meaning | Regex |
-|---|---|---|
-| `*` | any run (incl. empty) **within one segment** — never crosses `/` | `[^/]*` |
-| `?` | exactly one character within a segment | `[^/]` |
-| `**` (whole segment, not last) | zero or more whole segments | `(?:[^/]+/)*` |
-| `**` (whole segment, last) | the rest of the path | `.*` |
-| `**` embedded with other characters | degrades to `*` per star | — |
-| trailing `/` | sugar for `/**` (expanded before translation) | — |
-| anything else | literal (regex-escaped) | — |
+| Token                               | Meaning                                                          | Regex         |
+| ----------------------------------- | ---------------------------------------------------------------- | ------------- |
+| `*`                                 | any run (incl. empty) **within one segment** — never crosses `/` | `[^/]*`       |
+| `?`                                 | exactly one character within a segment                           | `[^/]`        |
+| `**` (whole segment, not last)      | zero or more whole segments                                      | `(?:[^/]+/)*` |
+| `**` (whole segment, last)          | the rest of the path                                             | `.*`          |
+| `**` embedded with other characters | degrades to `*` per star                                         | —             |
+| trailing `/`                        | sugar for `/**` (expanded before translation)                    | —             |
+| anything else                       | literal (regex-escaped)                                          | —             |
 
 Examples (mirrored from the `spec_match.py` module docstring; keep in sync):
 
-| Glob | Matches | Does not match |
-|---|---|---|
-| `packages/cli/src/commands/update.ts` | only that exact file | anything else |
-| `packages/cli/src/commands/*.ts` | `…/commands/update.ts` | `…/commands/channel/spawn.ts` |
-| `packages/cli/src/templates/**` | `…/templates/trellis/index.ts` (any depth) | `packages/cli/src/templates` (the directory path itself) |
-| `packages/**/index.ts` | `packages/index.ts`, `packages/cli/src/index.ts` | — |
-| `src/util?.py` | `src/utils.py` | `src/util.py`, `src/utilXY.py` |
-| `packages/cli/` | same as `packages/cli/**` | — |
+| Glob                                  | Matches                                          | Does not match                                           |
+| ------------------------------------- | ------------------------------------------------ | -------------------------------------------------------- |
+| `packages/cli/src/commands/update.ts` | only that exact file                             | anything else                                            |
+| `packages/cli/src/commands/*.ts`      | `…/commands/update.ts`                           | `…/commands/channel/spawn.ts`                            |
+| `packages/cli/src/templates/**`       | `…/templates/trellis/index.ts` (any depth)       | `packages/cli/src/templates` (the directory path itself) |
+| `packages/**/index.ts`                | `packages/index.ts`, `packages/cli/src/index.ts` | —                                                        |
+| `src/util?.py`                        | `src/utils.py`                                   | `src/util.py`, `src/utilXY.py`                           |
+| `packages/cli/`                       | same as `packages/cli/**`                        | —                                                        |
 
 On case-insensitive filesystems (macOS, Windows) the compiled regexes carry
 `re.IGNORECASE`: the very same file can be handed to the hook in a case the
@@ -212,7 +215,7 @@ Decision logic lives in **`common/spec_inject.py`** (`within_window`, `decide`,
 effects, and unit tests import it directly. The hook is the IO shell: stdin,
 config, identity, state files, locking, GC, one print. One accepted trade-off
 is recorded here deliberately: the hook reads and hashes every matched spec
-*before* deciding — sha-change-beats-window requires knowing the current
+_before_ deciding — sha-change-beats-window requires knowing the current
 content, and a stat/mtime shortcut would weaken that contract. The read is
 bounded: a spec source over **10 MiB** (`MAX_SPEC_SOURCE_BYTES`) is never
 read+hashed — it degrades straight to an index line with a stderr warn.
@@ -248,8 +251,12 @@ read+hashed — it degrades straight to an index line with a stderr warn.
 11. Empty payload → silent exit; otherwise print exactly one JSON object:
 
 ```json
-{"hookSpecificOutput": {"hookEventName": "PostToolUse",
-                        "additionalContext": "<payload>"}}
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PostToolUse",
+    "additionalContext": "<payload>"
+  }
+}
 ```
 
 Top-level `try/except → sys.exit(0)`: the hook **never** blocks the tool
@@ -335,7 +342,7 @@ elif not last.complete:    emit FULL     # recorded FULL was truncated → re-te
 else:                      emit TICKET   # refresh attention cheaply
 ```
 
-- **Fixed window, not sliding**: a silent hit does *not* extend the window — the
+- **Fixed window, not sliding**: a silent hit does _not_ extend the window — the
   window measures from the last **emission**, not the last touch, because
   continuous editing is exactly when drift is worst. Silent hits append no
   state.
@@ -359,8 +366,8 @@ else:                      emit TICKET   # refresh attention cheaply
 ### Identity ladder
 
 State is keyed by a session identity. **Misfire asymmetry** governs the
-design: a collision that *misses* an injection is unacceptable; drift that
-*over*-injects is merely wasteful — so when in doubt, inject.
+design: a collision that _misses_ an injection is unacceptable; drift that
+_over_-injects is merely wasteful — so when in doubt, inject.
 
 The session/window key is **delegated to
 `common.active_task.resolve_context_key`** — the same battle-tested resolver
@@ -375,12 +382,12 @@ exported env value — the collision direction is the unacceptable one.
 
 On top of that key:
 
-| Layer | Rule |
-|---|---|
-| subagent split | `+a-<sanitized agent_id>` appended when the payload carries a non-empty `agent_id`, so a **subagent never shares state with its parent** (their contexts are not shared) |
-| lifecycle reset | reset markers live in the base session shard; parent and subagent emission histories stay separate but compare against the same current reset |
-| fallback ladder | when `resolve_context_key` is unavailable (older installed scripts tree), a minimal payload-only ladder (session keys, then transcript hash) keeps the hook working |
-| stateless tier | no key from any source → **stateless**: no state I/O at all; every hit emits a TICKET (stateless wording). An unwritable state store trips the same tier for the event — the circuit breaker in §4 Refresh state store |
+| Layer           | Rule                                                                                                                                                                                                                   |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| subagent split  | `+a-<sanitized agent_id>` appended when the payload carries a non-empty `agent_id`, so a **subagent never shares state with its parent** (their contexts are not shared)                                               |
+| lifecycle reset | reset markers live in the base session shard; parent and subagent emission histories stay separate but compare against the same current reset                                                                          |
+| fallback ladder | when `resolve_context_key` is unavailable (older installed scripts tree), a minimal payload-only ladder (session keys, then transcript hash) keeps the hook working                                                    |
+| stateless tier  | no key from any source → **stateless**: no state I/O at all; every hit emits a TICKET (stateless wording). An unwritable state store trips the same tier for the event — the circuit breaker in §4 Refresh state store |
 
 ppid-based identity is **deliberately unwired**: Claude — the only registered
 platform — always yields a payload key, and unreliable CLI-vs-IDE process
@@ -394,7 +401,7 @@ appends `-` + the first 8 hex of `sha256(raw)`. The suffix makes the mapping
 injective over the keys the hook is handed: `a/b` vs `a:b`, or two keys
 sharing an 80-character head, can no longer fold onto one state file. (The
 shared resolver applies its own coarser collapsing before this hook ever sees
-the key, so two raw session ids that *it* folds together still share state —
+the key, so two raw session ids that _it_ folds together still share state —
 a documented upstream limit, not closable from this hook.) The output stays
 in `[A-Za-z0-9_-]`: `.` maps to `-`, so an identity can never mimic the
 `.<pid>` legacy shard suffix the GC name pattern recognizes, and `+` maps to
@@ -441,6 +448,7 @@ sanitized — is unforgeable.
   is omitted until the first clear/compact marker. Records with `v != 2` are
   ignored on read (safe direction: an ignored record re-injects rather than
   stays silent).
+
 - Each `SessionStart(source=clear|compact)` appends one base-shard marker:
 
   ```json
@@ -449,6 +457,7 @@ sanitized — is unforgeable.
 
   Old v2 emission lines remain readable. Once a reset marker exists, an old
   line without `reset` mismatches it and is re-taught in full.
+
 - **Locking**: a best-effort exclusive `fcntl.flock` is held across
   read→decide→append, closing the duplicate-injection race between concurrent
   hook processes on POSIX. No `fcntl` (Windows) or an unsupported filesystem →
@@ -481,10 +490,10 @@ sanitized — is unforgeable.
 
 ## 5. Budget rules
 
-| Cap | Default | Applies to |
-|---|---|---|
-| `max_spec_chars` | 9400 | one spec's body, sliced to that many **code points** + in-body truncation notice |
-| `max_total_chars` | 9500 | the **assembled payload string** — wrappers, `\n\n` separators, the `<spec-index>` block and its `(+N more)` summary, tickets: everything is counted, nothing is appended unchecked |
+| Cap               | Default | Applies to                                                                                                                                                                          |
+| ----------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `max_spec_chars`  | 9400    | one spec's body, sliced to that many **code points** + in-body truncation notice                                                                                                    |
+| `max_total_chars` | 9500    | the **assembled payload string** — wrappers, `\n\n` separators, the `<spec-index>` block and its `(+N more)` summary, tickets: everything is counted, nothing is appended unchecked |
 
 - `0` = unlimited for either cap (`channel.worker_guard` convention).
   `max_spec_chars: 0` lifts the per-spec cap only — a finite
@@ -529,7 +538,7 @@ sanitized — is unforgeable.
   `<spec-index>` degradation block — and dropped with a stderr warning if even a
   ticket does not fit, so the JSON envelope is never malformed.
 - Spec-index degradation is the floor, not an error: the agent always at least
-  learns *which* spec governs the file and where to read it.
+  learns _which_ spec governs the file and where to read it.
 
 ---
 
@@ -537,11 +546,11 @@ sanitized — is unforgeable.
 
 ```yaml
 spec_injection:
-  enabled: true                 # false disables push injection entirely
-  max_spec_chars: 9400          # per matched spec file; 0 = unlimited
-  max_total_chars: 9500         # whole per-event payload; 0 = unlimited
-  refresh_window_seconds: 2700  # fixed wall-clock window; 0 = never refresh
-  tools:                        # tool events that trigger injection
+  enabled: true # false disables push injection entirely
+  max_spec_chars: 9400 # per matched spec file; 0 = unlimited
+  max_total_chars: 9500 # whole per-event payload; 0 = unlimited
+  refresh_window_seconds: 2700 # fixed wall-clock window; 0 = never refresh
+  tools: # tool events that trigger injection
     - Read
     - Edit
     - Write
@@ -582,6 +591,9 @@ python3 .trellis/scripts/get_context.py --mode spec --file packages/cli/src/comm
 - Output: one line per match, `<rel spec path> — <description>` (literal
   `(no description)` when the spec declares none), or
   `No spec files declare paths matching <path>.`
+- With `--json`, output is
+  `{"file":"<requested path>","matches":[{"path":"<rel spec path>","description":"<description or null>"}]}`;
+  no match returns the same object with an empty `matches` array.
 - Exit 0 in both cases; omitting `--file` is an argparse usage error (exit 2).
 - Lists **paths + descriptions only, never bodies** — so it needs no budget
   and no dedup. Same matching engine as the hook (`match_specs_for_file`).
@@ -591,14 +603,14 @@ python3 .trellis/scripts/get_context.py --mode spec --file packages/cli/src/comm
 
 ## 8. Platform matrix
 
-| Platform | Push injection | Notes |
-|---|---|---|
-| Claude Code | ✅ wired | PostToolUse fires for **sub-agent tool calls too** — injection lands in the editing agent's own context (desired; complements, never duplicates, JSONL curation — different channel, refresh state is per session identity, and a subagent keeps state separate from its parent). Windows: cosmetic "hook error" display bug on record (claude-code#45065); if PostToolUse ever fails to fire, the feature degrades to nothing — no breakage. |
-| cursor, codex, gemini, qoder, copilot, codebuddy, droid, kiro, trae, zcode, opencode, pi, omp, snow | follow-up | The hook script is platform-neutral; registering one of these is wiring-only (settings template + `SHARED_HOOKS_BY_PLATFORM` row) **after** verifying the platform has a tool-event hook that consumes `additionalContext`. |
-| kilo, antigravity, devin | ❌ impossible | No hook surface at all. |
-| grok | ❌ impossible | Hook stdout `additionalContext` is not consumed (verified 0.2.x). |
-| kimi | ❌ impossible | Hooks are user-level only (`~/.kimi-code/config.toml`); Trellis writes no project-level hook files. |
-| reasonix | ❌ impossible | No prompt/tool hook surface. |
+| Platform                                                                                            | Push injection | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------------------------------------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code                                                                                         | ✅ wired       | PostToolUse fires for **sub-agent tool calls too** — injection lands in the editing agent's own context (desired; complements, never duplicates, JSONL curation — different channel, refresh state is per session identity, and a subagent keeps state separate from its parent). Windows: cosmetic "hook error" display bug on record (claude-code#45065); if PostToolUse ever fails to fire, the feature degrades to nothing — no breakage. |
+| cursor, codex, gemini, qoder, copilot, codebuddy, droid, kiro, trae, zcode, opencode, pi, omp, snow | follow-up      | The hook script is platform-neutral; registering one of these is wiring-only (settings template + `SHARED_HOOKS_BY_PLATFORM` row) **after** verifying the platform has a tool-event hook that consumes `additionalContext`.                                                                                                                                                                                                                   |
+| kilo, antigravity, devin                                                                            | ❌ impossible  | No hook surface at all.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| grok                                                                                                | ❌ impossible  | Hook stdout `additionalContext` is not consumed (verified 0.2.x).                                                                                                                                                                                                                                                                                                                                                                             |
+| kimi                                                                                                | ❌ impossible  | Hooks are user-level only (`~/.kimi-code/config.toml`); Trellis writes no project-level hook files.                                                                                                                                                                                                                                                                                                                                           |
+| reasonix                                                                                            | ❌ impossible  | No prompt/tool hook surface.                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 Pull mode (`--mode spec`) works on **every** platform; "impossible" above
 refers to push injection only.
@@ -628,24 +640,24 @@ checklists, no change to sub-agent JSONL curation or its budgets.
 
 ## 10. Failure modes
 
-| Failure | Behavior |
-|---|---|
-| No frontmatter anywhere (all pre-existing projects) | zero matches, no output — byte-identical to no hook |
-| Malformed frontmatter in one spec (bad `paths:` or an unterminated block) | stderr warn, that spec skipped |
-| One invalid glob in a spec | stderr warn, that glob skipped, the spec's other globs still apply |
-| Spec file unreadable | stderr warn, skipped |
-| Spec file over 10 MiB | stderr warn, degraded to an index line (never read+hashed) |
-| Refresh state unwritable (open/create fails) | circuit breaker: the event runs stateless ticket-only — bounded cost, never a FULL re-emission loop |
-| Refresh state read fails after open | circuit breaker: stateless ticket-only; stale emission state is not trusted |
-| State append fails after emission | stderr warn, emission stands |
-| No resolvable identity (stateless tier) | ticket-only every hit, zero state I/O |
-| SessionStart reset has no resolvable identity | stderr warn, no state write, exit 0 |
-| SessionStart reset state is unwritable | no state write, exit 0; later tool events retain their normal circuit breaker |
-| Matching/decision engine unimportable | hook degrades to nothing, exit 0 |
-| Hook internal bug | top-level try/except → exit 0, no output |
-| Payload near ceiling | budget enforced on the assembled payload string — ≤ 9,500 characters with separators, index block, summary and tickets all counted; overflow index lines collapse into a `(+N more …)` summary, itself budget-checked |
-| Invalid config values | stderr warn, per-key defaults |
-| Windows PostToolUse quirk | cosmetic error display only (#45065); worst case: no injection |
+| Failure                                                                   | Behavior                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No frontmatter anywhere (all pre-existing projects)                       | zero matches, no output — byte-identical to no hook                                                                                                                                                                   |
+| Malformed frontmatter in one spec (bad `paths:` or an unterminated block) | stderr warn, that spec skipped                                                                                                                                                                                        |
+| One invalid glob in a spec                                                | stderr warn, that glob skipped, the spec's other globs still apply                                                                                                                                                    |
+| Spec file unreadable                                                      | stderr warn, skipped                                                                                                                                                                                                  |
+| Spec file over 10 MiB                                                     | stderr warn, degraded to an index line (never read+hashed)                                                                                                                                                            |
+| Refresh state unwritable (open/create fails)                              | circuit breaker: the event runs stateless ticket-only — bounded cost, never a FULL re-emission loop                                                                                                                   |
+| Refresh state read fails after open                                       | circuit breaker: stateless ticket-only; stale emission state is not trusted                                                                                                                                           |
+| State append fails after emission                                         | stderr warn, emission stands                                                                                                                                                                                          |
+| No resolvable identity (stateless tier)                                   | ticket-only every hit, zero state I/O                                                                                                                                                                                 |
+| SessionStart reset has no resolvable identity                             | stderr warn, no state write, exit 0                                                                                                                                                                                   |
+| SessionStart reset state is unwritable                                    | no state write, exit 0; later tool events retain their normal circuit breaker                                                                                                                                         |
+| Matching/decision engine unimportable                                     | hook degrades to nothing, exit 0                                                                                                                                                                                      |
+| Hook internal bug                                                         | top-level try/except → exit 0, no output                                                                                                                                                                              |
+| Payload near ceiling                                                      | budget enforced on the assembled payload string — ≤ 9,500 characters with separators, index block, summary and tickets all counted; overflow index lines collapse into a `(+N more …)` summary, itself budget-checked |
+| Invalid config values                                                     | stderr warn, per-key defaults                                                                                                                                                                                         |
+| Windows PostToolUse quirk                                                 | cosmetic error display only (#45065); worst case: no injection                                                                                                                                                        |
 
 ---
 
@@ -711,7 +723,7 @@ hermeticity):
   truncated FULL records `complete: false` and re-teaches as FULL past the
   window (the stateful ticket wording is never a lie).
 - malformed `paths:` skipped with stderr warn; `spec_injection.enabled:
-  false` → empty; non-trigger tool / missing `file_path` / no `.trellis` → empty.
+false` → empty; non-trigger tool / missing `file_path` / no `.trellis` → empty.
 
 Pull mode:
 

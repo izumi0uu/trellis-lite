@@ -35,6 +35,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Uninstall Scrubbers](./uninstall-scrubbers.md) | Pure scrubber contract for structured config files (`settings.json`, `hooks.json`, `package.json`, `config.toml`) | Done |
 | [`trellis channel` Command](./commands-channel.md) | Multi-agent collaboration runtime: events.jsonl protocol, per-worker supervisor, provider adapters (claude / codex), project buckets, ephemeral / run lifecycle, ShutdownController state machine | Done |
 | [Spec Injection](./spec-injection.md) | Path-scoped on-demand spec injection: frontmatter `paths:` contract, glob matching, PostToolUse hook flow, ticket-refresh state machine, identity ladder, character budgets, platform matrix | Done |
+
 ---
 
 ## Pre-Development Checklist

@@ -1,8 +1,14 @@
 # Design: Path-scoped on-demand spec injection
 
+> Revision history: the v1/v2 designs below record how the implementation
+> evolved. The current contract is `.trellis/spec/cli/backend/spec-injection.md`;
+> transcript-based clocks and `compact_boundary` parsing were superseded by
+> documented `SessionStart(source=clear|compact)` lifecycle resets in
+> `.trellis/tasks/archive/2026-07/07-27-compaction-event-reset/design.md`.
+
 ## Architecture
 
-```
+```text
 .trellis/spec/**/*.md  (optional frontmatter: paths: [globs])
         │  bounded head-read + hand-rolled frontmatter parse
         ▼
@@ -10,12 +16,13 @@ common/spec_match.py  ── match(file_path) -> [SpecMatch(path, description)]
         │                                   │
         ▼                                   ▼
 shared-hooks/inject-spec-context.py   get_context.py --mode spec --file <p>
-  (Claude PostToolUse Edit|Write|MultiEdit)   (pull mode, all platforms)
-  budget + session dedup + truncation
+  (Claude PostToolUse Read|Edit|Write|MultiEdit;
+   SessionStart clear|compact reset)          (pull mode, all platforms)
+  budget + ticket refresh + lifecycle reset + truncation
   → hookSpecificOutput.additionalContext
 ```
 
-## Contracts
+## Contracts (historical v1; superseded)
 
 ### 1. Frontmatter (parsing in `common/spec_match.py`, new)
 
@@ -110,15 +117,15 @@ truncate at cap — the notice + path is the point); full set = whatever
 
 ## Failure-mode table
 
-| Failure | Behavior |
-|---|---|
-| No frontmatter anywhere (all existing projects) | zero matches, no output |
-| Malformed frontmatter | stderr warn, spec skipped |
-| Spec listed but unreadable | stderr warn, skipped |
-| State dir unwritable | inject (fail-open), warn |
-| Hook crashes (bug) | exit code guarded by top-level try/except → exit 0 |
-| additionalContext near ceiling | budget keeps total ≤ 9000 bytes |
-| Windows PostToolUse quirk | cosmetic error display only (#45065); worst case: no injection |
+| Failure                                         | Behavior                                                       |
+| ----------------------------------------------- | -------------------------------------------------------------- |
+| No frontmatter anywhere (all existing projects) | zero matches, no output                                        |
+| Malformed frontmatter                           | stderr warn, spec skipped                                      |
+| Spec listed but unreadable                      | stderr warn, skipped                                           |
+| State dir unwritable                            | inject (fail-open), warn                                       |
+| Hook crashes (bug)                              | exit code guarded by top-level try/except → exit 0             |
+| additionalContext near ceiling                  | budget keeps total ≤ 9000 bytes                                |
+| Windows PostToolUse quirk                       | cosmetic error display only (#45065); worst case: no injection |
 
 ## Compatibility
 
@@ -144,25 +151,31 @@ byte-based, fine; index.md Guidelines tables are prose, fine).
 
 ---
 
-# Design v2: ticket-refresh (exact contracts — implementation and tests code to THIS)
+# Historical design v2: ticket-refresh
 
-Supersedes §4 (session dedup) above. Everything not mentioned here is unchanged.
+This section superseded v1's session dedup at the time. Its transcript-clock
+details are themselves superseded by the lifecycle-reset design linked at the
+top of this file.
 
 ## Emissions (frozen formats)
 
 FULL (per matched spec; sha256 attr added vs v1):
 
-    <spec-context file="<edited rel>" spec="<spec rel>" sha256="<first 12 hex>">
-    <spec body, budgeted, truncation notice inside when capped>
-    </spec-context>
+```xml
+<spec-context file="<edited rel>" spec="<spec rel>" sha256="<first 12 hex>">
+<spec body, budgeted, truncation notice inside when capped>
+</spec-context>
+```
 
 TICKET (per matched spec):
 
-    <spec-ticket file="<edited rel>" spec="<spec rel>" sha256="<first 12 hex>">
-    You were shown this spec earlier in this session and its content is unchanged.
-    It still governs edits to matching files. If you no longer remember it, Read
-    <spec rel> before continuing.
-    </spec-ticket>
+```xml
+<spec-ticket file="<edited rel>" spec="<spec rel>" sha256="<first 12 hex>">
+You were shown this spec earlier in this session and its content is unchanged.
+It still governs edits to matching files. If you no longer remember it, Read
+<spec rel> before continuing.
+</spec-ticket>
+```
 
 Overflow degradation (`<spec-index>` block) applies to FULL bodies; the index
 block is itself budget-bounded — lines that do not fit collapse into one
@@ -174,47 +187,51 @@ malformed JSON.
 
 ## Decision engine
 
-    EDIT_TOOLS = ("Read", "Edit", "Write", "MultiEdit")
+```text
+EDIT_TOOLS = ("Read", "Edit", "Write", "MultiEdit")
 
-    identity, stateless = resolve_identity(root, payload)
-      # Session/window key DELEGATED to common.active_task.resolve_context_key
-      # (payload-first: allow_environment_context=False, then an env-inclusive
-      # second pass) — inherits all platform-verified key handling. On top:
-      # "+a-" + sanitize(agent_id) when payload has non-empty agent_id;
-      # minimal payload-only fallback ladder when the resolver is unavailable;
-      # no key from any source → stateless=True (ticket-only, zero state IO)
-    clock = {"lines": line_count(transcript_path) or None, "ts": time.time()}
-    for spec in matches:                    # specificity, then rel_path order
-        h = sha256(spec bytes).hexdigest()
-        last = newest state line for spec   # None when stateless or no record
-        decide per PRD v2 state machine; window compare:
-          both have lines → lines delta vs refresh_window_lines
-          else            → ts delta vs refresh_window_seconds
-          incomparable    → past-window
-          NEGATIVE delta  → past-window (transcript compacted shorter / clock
-                            skew: the earlier injection was likely lost — the
-                            over-inject side of the asymmetry principle)
-        emit FULL or TICKET → append state line (mode recorded); silent → no append
+identity, stateless = resolve_identity(root, payload)
+  # Session/window key DELEGATED to common.active_task.resolve_context_key
+  # (payload-first: allow_environment_context=False, then an env-inclusive
+  # second pass) — inherits all platform-verified key handling. On top:
+  # "+a-" + sanitize(agent_id) when payload has non-empty agent_id;
+  # minimal payload-only fallback ladder when the resolver is unavailable;
+  # no key from any source → stateless=True (ticket-only, zero state IO)
+clock = {"lines": line_count(transcript_path) or None, "ts": time.time()}
+for spec in matches:                    # specificity, then rel_path order
+    h = sha256(spec bytes).hexdigest()
+    last = newest state line for spec   # None when stateless or no record
+    decide per PRD v2 state machine; window compare:
+      both have lines → lines delta vs refresh_window_lines
+      else            → ts delta vs refresh_window_seconds
+      incomparable    → past-window
+      NEGATIVE delta  → past-window (transcript compacted shorter / clock
+                        skew: the earlier injection was likely lost — the
+                        over-inject side of the asymmetry principle)
+    emit FULL or TICKET → append state line (mode recorded); silent → no append
+```
 
 ## State file contract
 
 Path: `${TRELLIS_SPEC_STATE_DIR:-~/.trellis/spec-inject}/<project16>/<identity>.<pid>.jsonl`
-  project16 = sha256(str(realpath(repo_root)))[:16]
+project16 = sha256(str(realpath(repo_root)))[:16]
 Line: {"v":1,"spec":"<rel>","sha256":"<64hex>","mode":"full"|"ticket","ts":<float>,"lines":<int|null>,"pid":<int>}
 Read: merge every `<identity>.*.jsonl` shard, newest record per spec wins
-      (ts is the tiebreaker); malformed lines skipped silently.
+(ts is the tiebreaker); malformed lines skipped silently.
 Write: O_APPEND single line to own-pid shard; failure → stderr warn, proceed.
 GC: under the base dir, when `.last-gc` mtime older than 1 h: touch it, then
-    unlink any `*.jsonl` with mtime older than 48 h (best-effort, errors ignored).
+unlink any `*.jsonl` with mtime older than 48 h (best-effort, errors ignored).
 
 ## Config keys (template + doc)
 
-    spec_injection:
-      enabled: true
-      max_spec_bytes: 8192
-      max_total_bytes: 9000
-      refresh_window_lines: 300     # transcript-line clock; 0 = never refresh
-      refresh_window_seconds: 2700  # wall-clock fallback;  0 = never refresh
+```yaml
+spec_injection:
+  enabled: true
+  max_spec_bytes: 8192
+  max_total_bytes: 9000
+  refresh_window_lines: 300 # transcript-line clock; 0 = never refresh
+  refresh_window_seconds: 2700 # wall-clock fallback;  0 = never refresh
+```
 
 ## Registration delta
 
@@ -359,14 +376,15 @@ Stage V1's hermetic validation surfaced four defects IN THE FROZEN CONTRACT
 ITSELF (implemented as written, reported instead of improvised — see the run
 report). Amendments, each with the measured evidence that forced it:
 
-1. **R1 amendment — derived truncation cap.** As frozen, truncated-body (9400)
-   + notice (~114) + wrapper (~148) > 9500, so any spec over ~9,240 chars
-   degraded to an index line — the truncation path was unreachable (measured:
-   30,000-char fixture → 66-char index-only payload; live commands-update.md
-   34,985 chars → index-only, WORSE than pre-review). Amended rule: a FULL
-   that cannot fit whole is truncated to the LARGEST body prefix that still
-   fits the remaining total budget (wrapper + notice counted, join-accurate);
-   `max_spec_chars` remains an upper bound. Defaults stay 9400/9500.
+1. **R1 amendment — derived truncation cap.** As frozen,
+   `truncated-body (9400) + notice (~114) + wrapper (~148) > 9500`, so any spec
+   over ~9,240 chars
+     degraded to an index line — the truncation path was unreachable (measured:
+     30,000-char fixture → 66-char index-only payload; live commands-update.md
+     34,985 chars → index-only, WORSE than pre-review). Amended rule: a FULL
+     that cannot fit whole is truncated to the LARGEST body prefix that still
+     fits the remaining total budget (wrapper + notice counted, join-accurate);
+     `max_spec_chars` remains an upper bound. Defaults stay 9400/9500.
 2. **R5 amendment — GC name class gains `+`.** The frozen regex could not
    match `+a-<agent_id>` subagent shards (R3's own suffix), so they were never
    pruned. New pattern: `^[A-Za-z0-9_+-]+(\.[0-9]+)?\.jsonl$`.
@@ -390,6 +408,7 @@ reproduced). Decisions below are final for this round; agents implement
 verbatim and report contract defects instead of improvising.
 
 ## F1 (HIGH) Subagent clock beats
+
 Main transcripts tick on real user turns (unchanged). Subagent transcripts
 (agent_id present) tick on **assistant-message lines** (`type=="assistant"`,
 parsed not substring-guessed) — the agent-loop iteration is the conversation
@@ -401,6 +420,7 @@ assistant_turns when agent_id is present, else turns. One window key
 both beats explicitly.
 
 ## F2 Identity: collision-free sanitization
+
 Replace truncate-and-collapse _sanitize: keep filesystem-safe head
 (re.sub [^A-Za-z0-9_-] -> "-", first 80 chars) and, WHENEVER any character was
 replaced OR length exceeded 80, append "-" + sha256(raw)[:8]. Distinct raw keys
@@ -409,14 +429,16 @@ can no longer fold together. GC name regex unchanged (output stays in
 each part, preserving subagent separation.
 
 ## F3 One normalization
-spec_match._normalize_repo_relative becomes the exported canonical
+
+spec_match.\_normalize_repo_relative becomes the exported canonical
 (resolve(strict=False) both root and file to kill /tmp-vs-/private/tmp and
 symlink divergence; NFC-normalize; on darwin/win32 the glob regexes compile
 with re.IGNORECASE — case-insensitive filesystems, over-inject-safe). Hook
-deletes _repo_rel and imports the canonical. rel_path stored/displayed and
+deletes \_repo_rel and imports the canonical. rel_path stored/displayed and
 rel used for matching are now the same string by construction.
 
 ## F4 Frontmatter robustness
+
 - Flow sequences supported: `paths: [a, b]` splits on commas + unquotes each.
 - Head-read bound raised to 16 KiB / 200 lines; hitting the bound BEFORE the
   closing `---` => warn + skip spec (never silently partial).
@@ -424,14 +446,16 @@ rel used for matching are now the same string by construction.
   not-frontmatter (hr-opening prose files unaffected), no warning.
 
 ## F5 Config surface honesty
+
 - tools accepts block lists, flow lists ("[Edit, Write]"), and "[]" == disable
   all triggers (early exit). Unknown tool names warn once to stderr.
-- max_spec_chars: 0 == unlimited FULL body (fix _derive hi bound to len(text));
+- max_spec_chars: 0 == unlimited FULL body (fix \_derive hi bound to len(text));
   0 stays documented and tested.
 - MAX_SPEC_SOURCE_BYTES = 10 MiB: larger spec files degrade to index line with
   a stderr warn (no unbounded read+hash).
 
 ## F6 Budget: named-index reserve + honest tickets
+
 - Reserve while more candidates pend = actual per-candidate index-line sizes
   (true strings, not estimates) + summary line, capped at 900 chars; if the cap
   binds, fall back to summary-only reserve. §5 doc claim softened to match
@@ -443,25 +467,30 @@ rel used for matching are now the same string by construction.
 - fits/fits_reserved merged into one closure.
 
 ## F7 GC containment hardening
+
 Skip when project_dir or shard is a symlink; verify realpath(shard) stays
 under realpath(base). Keep name/depth gates.
 
 ## F8 Fail-soft scan
+
 scan_transcript catches Exception (not just OSError) -> None (wall-clock
 degrade); the whole injection event must never abort because a transcript
 line was hostile.
 
 ## F9 Platform-neutral input
+
 tool_input falls back to camelCase toolInput (sibling-hook parity). Windows
 stream reconfigure covers stderr too (six-hook parity).
 
 ## F10 Duplication removals
-_unquote/_strip_inline_comment imported from .trellis_config (copies deleted);
+
+\_unquote/\_strip_inline_comment imported from .trellis_config (copies deleted);
 SpecCandidate Protocol deleted — spec_inject imports SpecMatch from
 .spec_match; load_state tie-break fixed to newest-wins on equal ts.
 
 ## F11 Truthful docs & wording
-- _derive_fitting_full docstring rewritten (binary search).
+
+- \_derive_fitting_full docstring rewritten (binary search).
 - Hook module docstring: delegation-era identity description.
 - spec-injection.md: beats definition, sanitization scheme, reserve rule,
   complete-flag re-teach, GC symlink rule, bounds (16KiB/200), tools grammar,
@@ -475,15 +504,18 @@ SpecCandidate Protocol deleted — spec_inject imports SpecMatch from
 - The em-dash escape artifact in spec_match.py comment fixed.
 
 ## F12 Pi TS coverage
+
 New test transpiles truncateUtf8 out of pi/extensions/trellis/index.ts.txt via
 the typescript devDep (transpileModule), runs taosu's repro cases + a cap
 sweep. Reverting the TS fix must turn the suite red.
 
 ## F13 Five §12-required tests
+
 Implemented as written in the doc (or the doc line amended in the same commit
 when the case is genuinely untestable — each such amendment justified inline).
 
 ## Accepted, documented, not changed
+
 - Config numeric-coercion helper stays local to the hook (changing shared
   common/config.py has wider blast radius than the duplication costs) —
   comment added citing this decision.
@@ -494,6 +526,7 @@ when the case is genuinely untestable — each such amendment justified inline).
   known gap with the healing mechanism named.
 
 ## Verification bar for this round (user-mandated)
+
 Real-state evidence required: shipped scanner run against REAL transcripts on
 this machine (main session, subagent, compacted) with sane counts asserted in
 the gate log; every fixed finding re-run through its original audit repro;
