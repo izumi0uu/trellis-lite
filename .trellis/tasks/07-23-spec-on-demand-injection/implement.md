@@ -231,6 +231,9 @@ scope gaps were reported on each stage's dispatch, never improvised away.
       docs-stage time, incl. the three assertions F1/F4/F6 reverse by
       contract); flip this box with that stage's own gate log, together with
       the AF-F11 frozen-wording test updates.
+- [x] AF-F14. Discussion #474 specificity ordering: exact paths and narrower
+      matching globs now precede broad tree globs; `rel_path` is only the final
+      tie-break, with one regression test that reverses alphabetical order.
 
 Verification commands used across the stages:
 

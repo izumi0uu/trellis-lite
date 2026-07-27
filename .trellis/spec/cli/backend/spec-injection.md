@@ -176,8 +176,13 @@ Contract:
    or an unterminated block) → stderr warn, skip. No frontmatter or no/empty
    `paths` → skip silently.
 5. **First matching glob per spec wins** (`break`): each spec appears at most
-   once per event regardless of how many of its globs match.
-6. Results are sorted by `rel_path` — deterministic injection order.
+   once per event regardless of how many of its globs match. That glob also
+   supplies the spec's ordering score.
+6. Results are sorted by matching-glob specificity: exact paths before
+   patterns, then more literal path segments, fewer wildcard characters, and
+   more literal characters. `rel_path` is the final deterministic tie-break.
+   Payload assembly spends its budget in this order, so a file-specific rule
+   cannot be crowded out by an alphabetically earlier tree-wide rule.
 7. Never raises: the whole scan is wrapped; any unexpected exception → stderr
    warn + `[]`. Callers are hooks and context tools.
 
@@ -308,7 +313,7 @@ v1 injected a spec once per session and then stayed silent forever — which
 100+ the agent no longer follows a rule it was shown once at round 3). v2 keeps
 a spec present by re-emitting it, cheaply, on a **fixed** refresh window.
 
-Per matched spec, per event (stable `rel_path` order):
+Per matched spec, per event (specificity order, then stable `rel_path`):
 
 ```
 h    = sha256(spec bytes)

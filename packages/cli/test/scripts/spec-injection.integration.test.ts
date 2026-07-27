@@ -828,20 +828,30 @@ for g in ["/abs/path.ts", "a/../b.ts", "src\\\\win.ts", "", "src/app.ts"]:
   });
 
   describe("common/spec_match.py: match_specs_for_file", () => {
-    it("returns matching specs in stable rel_path order; specs without frontmatter are ignored", () => {
+    it("ranks exact and narrower globs before broad globs; rel_path breaks ties", () => {
       writeSpec(
         tmp,
-        "cli/commands.md",
-        "---\ndescription: command conventions\npaths:\n  - src/commands/**\n---\nBody\n",
+        "aa-broad.md",
+        "---\npaths:\n  - src/**\n---\nBody\n",
       );
       writeSpec(tmp, "guides/style.md", "# Plain spec without frontmatter\n");
-      writeSpec(tmp, "zz.md", "---\npaths:\n  - src/**\n---\nBody\n");
+      writeSpec(
+        tmp,
+        "mm-narrow.md",
+        "---\ndescription: command conventions\npaths:\n  - src/commands/*.ts\n---\nBody\n",
+      );
+      writeSpec(
+        tmp,
+        "zz-exact.md",
+        "---\npaths:\n  - src/commands/update.ts\n---\nBody\n",
+      );
 
       const r = runMatch(tmp, "src/commands/update.ts");
       expect(r.status).toBe(0);
       expect(r.stdout.trim().split("\n")).toEqual([
-        ".trellis/spec/cli/commands.md|command conventions",
-        ".trellis/spec/zz.md|None",
+        ".trellis/spec/zz-exact.md|None",
+        ".trellis/spec/mm-narrow.md|command conventions",
+        ".trellis/spec/aa-broad.md|None",
       ]);
 
       const miss = runMatch(tmp, "docs/readme.md");

@@ -44,9 +44,10 @@ class SpecMatch:
     description: str | None
 
 def match_specs_for_file(repo_root: Path, file_path: str | Path) -> list[SpecMatch]:
-    """file_path absolute or repo-relative; returns matches in stable
-    (rel_path sorted) order. Scans .trellis/spec/**/*.md head-reads only.
-    Never raises; unreadable spec files are skipped with stderr warning."""
+    """file_path absolute or repo-relative; returns exact/narrow matches before
+    broad matches, with rel_path as the final tie-break. Scans
+    .trellis/spec/**/*.md head-reads only. Never raises; unreadable spec files
+    are skipped with stderr warning."""
 ```
 
 ### 3. Hook `shared-hooks/inject-spec-context.py`
@@ -183,7 +184,7 @@ malformed JSON.
       # minimal payload-only fallback ladder when the resolver is unavailable;
       # no key from any source → stateless=True (ticket-only, zero state IO)
     clock = {"lines": line_count(transcript_path) or None, "ts": time.time()}
-    for spec in matches:                    # stable rel_path order
+    for spec in matches:                    # specificity, then rel_path order
         h = sha256(spec bytes).hexdigest()
         last = newest state line for spec   # None when stateless or no record
         decide per PRD v2 state machine; window compare:

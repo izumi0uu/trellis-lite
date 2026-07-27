@@ -327,10 +327,10 @@ def normalize_repo_relative(repo_root: Path, file_path: str | Path) -> str | Non
 def match_specs_for_file(repo_root: Path, file_path: str | Path) -> list[SpecMatch]:
     """Return specs whose frontmatter ``paths:`` globs match file_path.
 
-    ``file_path`` may be absolute or repo-relative. Matches are returned in
-    stable ``rel_path``-sorted order. Scans ``.trellis/spec/**/*.md`` with
-    bounded head-reads only. Never raises; unreadable or malformed spec files
-    are skipped with a stderr warning.
+    ``file_path`` may be absolute or repo-relative. More specific matching
+    globs are returned first; ``rel_path`` is the deterministic tie-break.
+    Scans ``.trellis/spec/**/*.md`` with bounded head-reads only. Never raises;
+    unreadable or malformed spec files are skipped with a stderr warning.
     """
     try:
         repo_root = Path(repo_root).resolve()
@@ -342,6 +342,7 @@ def match_specs_for_file(repo_root: Path, file_path: str | Path) -> list[SpecMat
             return []
 
         matches: list[SpecMatch] = []
+        specificity: dict[str, tuple[int, int, int, int]] = {}
         for spec_file in spec_dir.rglob("*.md"):
             spec_rel = spec_file.relative_to(repo_root).as_posix()
             try:
@@ -362,6 +363,19 @@ def match_specs_for_file(repo_root: Path, file_path: str | Path) -> list[SpecMat
                     _warn(f"invalid glob {glob!r} in {spec_rel}: {error}")
                     continue
                 if glob_to_regex(glob).match(rel):
+                    scored_glob = glob + "**" if glob.endswith("/") else glob
+                    wildcard_count = scored_glob.count("*") + scored_glob.count("?")
+                    segments = scored_glob.split("/")
+                    literal_segments = sum(
+                        "*" not in segment and "?" not in segment
+                        for segment in segments
+                    )
+                    specificity[spec_rel] = (
+                        0 if wildcard_count == 0 else 1,
+                        -literal_segments,
+                        wildcard_count,
+                        -(len(scored_glob) - wildcard_count),
+                    )
                     matches.append(
                         SpecMatch(
                             spec_path=spec_file,
@@ -371,7 +385,10 @@ def match_specs_for_file(repo_root: Path, file_path: str | Path) -> list[SpecMat
                     )
                     break
 
-        matches.sort(key=lambda m: m.rel_path)
+        # Payload assembly spends its budget in this order. Exact and narrowly
+        # scoped matches must therefore outrank broad tree globs; alphabetic
+        # order is only a deterministic tie-break.
+        matches.sort(key=lambda m: (*specificity[m.rel_path], m.rel_path))
         return matches
     except Exception as exc:  # Never raise — callers are hooks/context tools.
         _warn(f"spec scan failed: {exc}")
