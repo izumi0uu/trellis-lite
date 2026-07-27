@@ -21,6 +21,11 @@
             "type": "command",
             "command": "{{PYTHON_CMD}} .claude/hooks/session-start.py",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "{{PYTHON_CMD}} .claude/hooks/inject-spec-context.py",
+            "timeout": 30
           }
         ]
       },
@@ -30,6 +35,11 @@
           {
             "type": "command",
             "command": "{{PYTHON_CMD}} .claude/hooks/session-start.py",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "{{PYTHON_CMD}} .claude/hooks/inject-spec-context.py",
             "timeout": 30
           }
         ]

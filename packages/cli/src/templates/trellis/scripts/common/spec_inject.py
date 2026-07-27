@@ -3,32 +3,16 @@
 """
 Decision logic for path-scoped spec injection (ticket-refresh model).
 
-Pure logic only: the transcript clock, the per-spec decision engine, block
-rendering and budgeted payload assembly. Importing this module has no side
-effects; every piece of IO orchestration (stdin, config, identity, state files,
-locking, GC) lives in the hook that calls it —
-``.claude/hooks/inject-spec-context.py``. Unit tests import this module
-directly.
+Pure logic only: the per-spec decision engine, block rendering and budgeted
+payload assembly. Importing this module has no side effects; every piece of IO
+orchestration (stdin, config, identity, state files, locking, GC) lives in the
+hook that calls it — ``.claude/hooks/inject-spec-context.py``. Unit tests
+import this module directly.
 
 Clock
-    The window is measured in *beats* of the agent's own transcript, and what
-    a beat is depends on which transcript it is:
-
-    - Main session (``turns``): a real user turn — a line with
-      ``type == "user"``, a string ``message.content``, and no ``isMeta``
-      (tool results and meta lines carry structured content and do not count).
-    - Subagent (``assistant_turns``): an assistant message — a line with
-      ``type == "assistant"``. A subagent transcript has exactly one real user
-      turn (its prompt) forever, so user turns cannot measure anything there;
-      the agent loop's iteration is the conversation beat instead.
-
-    ``scan_transcript`` counts both; the caller picks (see ``select_beats``)
-    and passes the chosen count as ``clock["turns"]``.
-
-    A *boundary* is a ``type == "system"`` line with
-    ``subtype == "compact_boundary"``: the transcript is append-only, so a
-    boundary appearing after an emission means the injected text was compacted
-    away and must be re-taught in full.
+    The periodic refresh window uses epoch seconds. Context resets are
+    explicit lifecycle events: the hook records an opaque reset identifier,
+    and a mismatch with the last emission re-teaches the spec in full.
 
 Budget
     All caps are in characters, because the platform's ``additionalContext``
@@ -42,15 +26,10 @@ Budget
 from __future__ import annotations
 
 import hashlib
-import json
 import sys
 from typing import Any, Sequence
 
 from .spec_match import SpecMatch
-
-# Bound on how much of a transcript is scanned for the clock. Beyond this the
-# caller falls back to the wall clock rather than pay an unbounded read.
-TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
 
 # Bound on the size of a spec file we are willing to read and hash. A spec
 # larger than this degrades to an index line (warned) — an inlined body that
@@ -66,15 +45,6 @@ INDEX_RESERVE_MAX_CHARS = 900
 # (safe direction: an ignored record re-injects rather than stays silent).
 STATE_VERSION = 2
 
-# Substring prefilters applied before json.loads on each transcript line —
-# the vast majority of lines match neither and are never parsed.
-# Contract amendment 4: tolerate both JSON spacings — Claude Code emits
-# '"type":"user"' (no space) but a conforming producer may emit a space.
-_USER_PREFILTERS = (b'"type":"user"', b'"type": "user"')
-_ASSISTANT_PREFILTERS = (b'"type":"assistant"', b'"type": "assistant"')
-_BOUNDARY_PREFILTER = b'"compact_boundary"'
-
-
 def _warn(message: str) -> None:
     print(f"[WARN] spec_inject: {message}", file=sys.stderr)
 
@@ -84,116 +54,18 @@ def _warn(message: str) -> None:
 # =============================================================================
 
 
-def _is_real_turn(record: dict[str, Any]) -> bool:
-    """True for a real user turn (not a tool result, not a meta line)."""
-    if record.get("type") != "user":
-        return False
-    if record.get("isMeta"):
-        return False
-    message = record.get("message")
-    if not isinstance(message, dict):
-        return False
-    return isinstance(message.get("content"), str)
-
-
-def _is_compact_boundary(record: dict[str, Any]) -> bool:
-    return (
-        record.get("type") == "system"
-        and record.get("subtype") == "compact_boundary"
-    )
-
-
-def scan_transcript(
-    path: str | None,
-    max_bytes: int = TRANSCRIPT_MAX_BYTES,
-) -> dict[str, int] | None:
-    """Return ``{"turns", "assistant_turns", "boundaries"}`` for a transcript.
-
-    Single pass, one line at a time, with a substring prefilter before any
-    ``json.loads`` — but every count is decided on the *parsed* record, never
-    on the substring alone. Returns None when the path is empty, unreadable,
-    larger than ``max_bytes``, or hostile in any other way: a transcript line
-    must never be able to abort an injection event, so the whole scan degrades
-    to the wall clock instead of raising.
-    """
-    if not isinstance(path, str) or not path.strip():
-        return None
-
-    turns = 0
-    assistant_turns = 0
-    boundaries = 0
-    read = 0
-    try:
-        with open(path.strip(), "rb") as f:
-            for raw in f:
-                read += len(raw)
-                if read > max_bytes:
-                    return None
-                is_user = any(p in raw for p in _USER_PREFILTERS)
-                is_assistant = any(p in raw for p in _ASSISTANT_PREFILTERS)
-                is_boundary = _BOUNDARY_PREFILTER in raw
-                if not (is_user or is_assistant or is_boundary):
-                    continue
-                try:
-                    record = json.loads(raw)
-                except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                if is_user and _is_real_turn(record):
-                    turns += 1
-                if is_assistant and record.get("type") == "assistant":
-                    assistant_turns += 1
-                if is_boundary and _is_compact_boundary(record):
-                    boundaries += 1
-    except Exception:
-        # Fail-soft: an unreadable, truncated or otherwise hostile transcript
-        # degrades this event to the wall clock; it never breaks the hook.
-        return None
-
-    return {
-        "turns": turns,
-        "assistant_turns": assistant_turns,
-        "boundaries": boundaries,
-    }
-
-
-def select_beats(counts: dict[str, int] | None, subagent: bool) -> int | None:
-    """Pick the beat count that measures THIS agent's conversation.
-
-    A subagent transcript is frozen at one real user turn (its prompt), so its
-    beats are assistant messages; a main transcript beats on real user turns.
-    None (no readable transcript) → the caller falls back to the wall clock.
-    """
-    if not counts:
-        return None
-    return counts.get("assistant_turns") if subagent else counts.get("turns")
-
-
 def within_window(
     clock: dict[str, Any],
     last: dict[str, Any],
-    win_turns: int,
     win_seconds: int,
 ) -> bool:
     """True when the last emission is still inside the refresh window (→ stay
     silent).
 
-    Compares beats-to-beats when both sides have a beat count, else
-    seconds-to-seconds; truly incomparable → past-window (False → refresh, the
-    over-inject side of the asymmetry). A window of ``0`` means never refresh
-    (infinite window → always True). A NEGATIVE delta is a clock anomaly
-    (wall-clock skew, a replaced transcript) and is treated as past-window,
-    again the safe direction.
+    A window of ``0`` means never refresh (infinite window → always True).
+    Missing timestamps or a negative delta are past-window (False → refresh),
+    the safe side of the misfire asymmetry.
     """
-    cur_turns = clock.get("turns")
-    last_turns = last.get("turns")
-    if isinstance(cur_turns, int) and isinstance(last_turns, int):
-        if win_turns == 0:
-            return True
-        delta = cur_turns - last_turns
-        return 0 <= delta < win_turns
-
     cur_ts = clock.get("ts")
     last_ts = last.get("ts")
     if isinstance(cur_ts, (int, float)) and isinstance(last_ts, (int, float)):
@@ -210,17 +82,15 @@ def decide(
     last: dict[str, Any] | None,
     sha256_hex: str,
     clock: dict[str, Any],
-    win_turns: int,
     win_seconds: int,
 ) -> str:
     """Return one of ``"full"`` | ``"ticket"`` | ``"silent"`` for a spec.
 
     Order is contractual: statelessness first (bounded cost, no state to
-    consult), then first sight, then content change, then compaction (the
-    injected text is genuinely gone — a ticket would point at a memory that no
-    longer exists), then the refresh window, and finally completeness: a
-    ticket says "you were shown this spec", which is a lie when the recorded
-    FULL was truncated, so an incomplete record is re-taught in full instead.
+    consult), then first sight, content change, context reset, the refresh
+    window, and finally completeness. A ticket says "you were shown this spec",
+    which is a lie when the recorded FULL was truncated, so an incomplete
+    record is re-taught in full instead.
     """
     if stateless:
         return "ticket"
@@ -228,17 +98,10 @@ def decide(
         return "full"
     if last.get("sha256") != sha256_hex:
         return "full"
-
-    cur_boundaries = clock.get("boundaries")
-    last_boundaries = last.get("boundaries")
-    if (
-        isinstance(cur_boundaries, int)
-        and isinstance(last_boundaries, int)
-        and cur_boundaries > last_boundaries
-    ):
+    if clock.get("reset") != last.get("reset"):
         return "full"
 
-    if within_window(clock, last, win_turns, win_seconds):
+    if within_window(clock, last, win_seconds):
         return "silent"
 
     # "complete" is optional and absent means a whole body was shown.
@@ -327,9 +190,9 @@ def make_record(
         "sha256": sha256_hex,
         "mode": mode,
         "ts": clock.get("ts"),
-        "turns": clock.get("turns"),
-        "boundaries": clock.get("boundaries"),
     }
+    if isinstance(clock.get("reset"), str):
+        record["reset"] = clock["reset"]
     if not complete:
         record["complete"] = False
     return record
@@ -394,7 +257,6 @@ def assemble_payload(
     clock: dict[str, Any],
     max_spec_chars: int,
     max_total_chars: int,
-    win_turns: int,
     win_seconds: int,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Assemble the additionalContext payload from the matched specs.
@@ -466,7 +328,7 @@ def assemble_payload(
         sha256_hex = hashlib.sha256(data).hexdigest()
         sha12 = sha256_hex[:12]
         last = None if stateless else state_records.get(match.rel_path)
-        decision = decide(stateless, last, sha256_hex, clock, win_turns, win_seconds)
+        decision = decide(stateless, last, sha256_hex, clock, win_seconds)
 
         if decision == "silent":
             continue

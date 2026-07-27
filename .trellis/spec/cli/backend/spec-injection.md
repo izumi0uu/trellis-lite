@@ -198,13 +198,16 @@ list-of-exact-strings semantics — the docs' own PostToolUse example uses
 governed file — even a `Read` — counts; the miss path stays a fast exit. Which
 tool events trigger is filtered **in-hook** by `spec_injection.tools` (default
 those four), so users can e.g. drop `Read` without editing settings. The
+same hook also runs after `SessionStart(source=clear|compact)` with the
+SessionStart-standard timeout 30 to record a context reset; it is deliberately
+absent from `source=startup`.
 script keeps the shared-hooks platform-neutral shape so later registrations
 are wiring-only.
 
 ### Structure: pure logic vs IO shell
 
-Decision logic lives in **`common/spec_inject.py`** (`scan_transcript`,
-`select_beats`, `within_window`, `decide`, `truncate_chars`, `render_full` /
+Decision logic lives in **`common/spec_inject.py`** (`within_window`, `decide`,
+`truncate_chars`, `render_full` /
 `render_ticket`, `assemble_payload`, `make_record`) — importing it has no side
 effects, and unit tests import it directly. The hook is the IO shell: stdin,
 config, identity, state files, locking, GC, one print. One accepted trade-off
@@ -218,23 +221,27 @@ read+hashed — it degrades straight to an index line with a stderr warn.
 
 1. Env kill switches: `TRELLIS_HOOKS=0` or `TRELLIS_DISABLE_HOOKS=1`.
 2. stdin JSON parse; non-dict or parse failure → silent exit.
-3. `tool_name` (fallback `toolName`) must be a non-empty string.
-4. `tool_input.file_path` must be a non-empty string.
-5. Repo root: walk up from `cwd` (fallback `os.getcwd()`) to find `.trellis/`.
-6. Bail **before any spec scan** when `.trellis/spec/` is absent — a spec-less
+3. Repo root: walk up from `cwd` (fallback `os.getcwd()`) to find `.trellis/`.
+4. Bail **before any spec scan** when `.trellis/spec/` is absent — a spec-less
    project pays only the subprocess spawn.
-7. Config gate: `spec_injection.enabled: false` → silent exit; `tool_name` not
+5. Config gate: `spec_injection.enabled: false` → silent exit.
+6. A `SessionStart` with `source=clear|compact` resolves the base session
+   identity, appends one reset marker, and exits silently. Other SessionStart
+   sources exit silently.
+7. `tool_name` (fallback `toolName`) must be a non-empty string;
+   `tool_input.file_path` must be a non-empty string; `tool_name` not
    in `spec_injection.tools` → silent exit (`tools: []` disables every
    trigger — early exit).
 8. Import `common.spec_match` + `common.spec_inject` from `.trellis/scripts`
    (sys.path extension); import failure → degrade to nothing.
 9. Match; no matches → silent exit.
-10. Resolve identity; unless stateless: run GC (hourly gate), open the
-    identity's state shard for read+append (**the open doubles as the
+10. Resolve the base session identity and agent-specific emission identity;
+    unless stateless: run GC (hourly gate), read the latest reset marker from
+    the base shard, then open the emission identity's state shard for
+    read+append (**the open doubles as the
     writability probe** — failure trips the circuit breaker and the event runs
     stateless ticket-only), take a best-effort `fcntl` lock, load the shard's
-    state, and read the clock from the transcript (the subagent's own when the
-    event carries an `agent_id`). Then run the per-spec decision engine and
+    state. Then run the per-spec decision engine and
     assemble the budgeted payload; state lines are appended **under the same
     lock**, only for specs that actually emitted (FULL or TICKET) — silent and
     budget-dropped specs record nothing and stay eligible.
@@ -321,8 +328,8 @@ last = newest emission recorded for (identity, spec)   # stateless → None
 if stateless:              emit TICKET   # bounded cost, always (stateless wording)
 elif last is None:         emit FULL     # first time this identity
 elif last.sha256 != h:     emit FULL     # spec changed → re-teach in full
-elif boundaries_now > last.boundaries    # both known
-                           emit FULL     # compacted since last → text is gone
+elif current_reset != last.reset:
+                           emit FULL     # cleared/compacted since last
 elif within window:        silent        # no state append
 elif not last.complete:    emit FULL     # recorded FULL was truncated → re-teach whole
 else:                      emit TICKET   # refresh attention cheaply
@@ -334,9 +341,10 @@ else:                      emit TICKET   # refresh attention cheaply
   state.
 - The content-hash check **beats the window**: a spec edited between touches is
   re-taught in full immediately, regardless of how recently it was shown.
-- The compaction check sits **before** the window check: after a
-  `compact_boundary` the injected text is genuinely gone — a ticket would
-  point at a memory that no longer exists, so the spec is re-taught in full.
+- The reset check sits **before** the window check: after
+  `SessionStart(source=clear|compact)` the injected text is gone — a ticket
+  would point at a memory that no longer exists, so the spec is re-taught in
+  full. A legacy v2 emission without `reset` is stale after the first marker.
 - The completeness check sits **after** the window check: a record whose FULL
   body was emitted truncated below the whole spec carries `"complete": false`
   (absent == whole), and once past the window it is re-taught as another FULL
@@ -370,6 +378,7 @@ On top of that key:
 | Layer | Rule |
 |---|---|
 | subagent split | `+a-<sanitized agent_id>` appended when the payload carries a non-empty `agent_id`, so a **subagent never shares state with its parent** (their contexts are not shared) |
+| lifecycle reset | reset markers live in the base session shard; parent and subagent emission histories stay separate but compare against the same current reset |
 | fallback ladder | when `resolve_context_key` is unavailable (older installed scripts tree), a minimal payload-only ladder (session keys, then transcript hash) keeps the hook working |
 | stateless tier | no key from any source → **stateless**: no state I/O at all; every hit emits a TICKET (stateless wording). An unwritable state store trips the same tier for the event — the circuit breaker in §4 Refresh state store |
 
@@ -392,65 +401,20 @@ in `[A-Za-z0-9_-]`: `.` maps to `-`, so an identity can never mimic the
 `-`, so the `+a-<agent_id>` subagent suffix — appended AFTER each part is
 sanitized — is unforgeable.
 
-### Clock (refresh-window units)
+### Refresh window and lifecycle reset
 
-The window is measured in **beats** of the agent's own transcript when it is
-readable, else in **epoch seconds**. A state record stores both when
-available (the beat count lands in the record's `turns` field). What a beat
-is depends on which transcript it is:
-
-- **Main session**: a beat is a **real user turn** — a transcript line with
-  `type=="user"` AND `message.content` is a string AND no `isMeta`. Tool
-  results and meta lines carry structured content and do not count. (Raw line
-  counts run tens of lines per real turn on measured transcripts — which is
-  why the v1 line clock measured the wrong thing and was replaced by turns.)
-- **Subagent** (the event carries an `agent_id`): a beat is an
-  **assistant-message line** (`type=="assistant"`, decided on the parsed
-  record, never on a substring guess) — the agent-loop iteration is the
-  conversation beat there. A subagent transcript is structurally frozen at
-  exactly one real user turn (its prompt) forever — verified 58/58 real
-  subagent transcripts, 2026-07-25 — so user turns cannot measure anything in
-  one. `scan_transcript` returns `{"turns", "assistant_turns", "boundaries"}`
-  and `select_beats` picks by `agent_id` presence. One window key
-  (`refresh_window_turns`) covers both — its unit is beats of that
-  transcript.
-- A **compact boundary** = a line with `type=="system"`,
-  `subtype=="compact_boundary"`. Transcripts are **append-only**: `/compact`
-  appends a boundary record and the file never shrinks (verified on real
-  transcripts, 2026-07-25). Compaction is therefore detected by comparing
-  boundary counts — `boundaries_now > boundaries_at_last_emission` → FULL
-  (decision engine above) — never by watching the transcript get shorter.
-- The scan is a single pass, one line at a time, with byte substring
-  prefilters (`"type":"user"` / `"type":"assistant"` — each with and without
-  a space after the colon — / `"compact_boundary"`) applied before any
-  `json.loads`; the prefilter is only a necessary condition — every count is
-  decided on the parsed record. A transcript larger than **64 MiB**, or one
-  that is unreadable or hostile in any way (`scan_transcript` catches
-  `Exception`, not just `OSError`), falls back to the wall clock — a
-  transcript line must never be able to abort an injection event.
-- **Subagent events** (`agent_id` present) read the **subagent's own
-  transcript**, derived from the parent's path:
-  `<transcript dir>/<parent stem>/subagents/agent-<agent_id>.jsonl`
-  (convention verified locally, 2026-07-25). If that file is absent → wall
-  clock — **never** the parent's counts: the parent idles while the subagent
-  runs, so its clock would under-count and under-inject, the unacceptable
-  direction.
-- Comparison is beats-to-beats when both the current clock and the recorded
-  record carry a beat count, else seconds-to-seconds; truly incomparable units
-  are treated as **past-window** (the over-inject side). A **negative delta**
-  is a plain clock anomaly (wall-clock skew, a replaced transcript file) and
-  is also treated as past-window — the safe direction. It does **not** detect
-  `/compact` (transcripts never shrink; compaction detection is the boundary
-  rule above).
-- **Known bounded gap** (accepted, 2026-07-25): a record written under the
-  wall clock carries no boundary count, so a later transcript-based event
-  cannot anchor the compaction comparison against it — one `/compact` inside
-  that gap goes undetected and a ticket may point at compacted-away text. The
-  gap self-heals on the next transcript-based emission: that record stores
-  the current boundary count, re-arming compaction detection.
-- `refresh_window_turns: 0` or `refresh_window_seconds: 0` means "never
-  refresh" in that clock mode — both `0` reproduces the legacy inject-once
-  behavior.
+- The periodic refresh window uses **epoch seconds** only. A negative delta or
+  missing timestamp is past-window (the over-inject side of the asymmetry).
+  `refresh_window_seconds: 0` disables time-based reminders.
+- The hook never opens or parses a Claude transcript. `transcript_path`
+  remains an identity input only through the shared context resolver.
+- Claude's documented `SessionStart` event is the compaction/clear signal:
+  `source=clear|compact` appends `{"v":2,"reset":"<opaque>","ts":<float>}` to
+  the base session shard. `source=startup` does not reset exposure state.
+- Every emission records the current reset identifier when one exists.
+  A mismatch between that value and the latest base reset forces FULL before
+  the wall-clock check. Parent and subagent histories therefore remain
+  independent while both react to the same clear/compact event.
 
 ### Refresh state store
 
@@ -469,13 +433,22 @@ is depends on which transcript it is:
 - Each emission appends one line:
 
   ```json
-  {"v":2,"spec":"<rel>","sha256":"<64hex>","mode":"full"|"ticket","ts":<float>,"turns":<int|null>,"boundaries":<int|null>}
+  {"v":2,"spec":"<rel>","sha256":"<64hex>","mode":"full"|"ticket","ts":<float>,"reset":"<opaque>"}
   ```
 
   A FULL whose emitted body was truncated below the whole spec additionally
-  carries `"complete": false` (absent == whole; §4 Decision engine). `turns`
-  stores the beat count (§4 Clock). Records with `v != 2` are ignored on read
-  (safe direction: an ignored record re-injects rather than stays silent).
+  carries `"complete": false` (absent == whole; §4 Decision engine). `reset`
+  is omitted until the first clear/compact marker. Records with `v != 2` are
+  ignored on read (safe direction: an ignored record re-injects rather than
+  stays silent).
+- Each `SessionStart(source=clear|compact)` appends one base-shard marker:
+
+  ```json
+  {"v":2,"reset":"<opaque>","ts":<float>}
+  ```
+
+  Old v2 emission lines remain readable. Once a reset marker exists, an old
+  line without `reset` mismatches it and is re-taught in full.
 - **Locking**: a best-effort exclusive `fcntl.flock` is held across
   read→decide→append, closing the duplicate-injection race between concurrent
   hook processes on POSIX. No `fcntl` (Windows) or an unsupported filesystem →
@@ -486,9 +459,9 @@ is depends on which transcript it is:
   reads, no writes) — bounded cost, instead of the fail-open-toward-FULL
   posture that re-emitted ~9 KB of spec on every event forever when the store
   was unwritable.
-- **Read**: newest record per spec wins (`ts` tiebreaker); malformed lines are
-  skipped silently. An unreadable-but-writable store reads as empty → FULL
-  (still the inject direction).
+- **Read**: newest record per spec wins (`ts` tiebreaker); the last reset line
+  in append order is current. Malformed lines are skipped silently. A read
+  failure trips stateless ticket mode.
 - **Write**: `O_APPEND` single lines through the same locked fd; any failure
   warns to stderr and proceeds (the emission already went out).
 - **GC**: at most once per hour (gated by a `.last-gc` mtime marker in the
@@ -567,8 +540,7 @@ spec_injection:
   enabled: true                 # false disables push injection entirely
   max_spec_chars: 9400          # per matched spec file; 0 = unlimited
   max_total_chars: 9500         # whole per-event payload; 0 = unlimited
-  refresh_window_turns: 30      # beats of the agent's own transcript (§4 Clock); 0 = never refresh
-  refresh_window_seconds: 2700  # wall-clock fallback; 0 = never refresh
+  refresh_window_seconds: 2700  # fixed wall-clock window; 0 = never refresh
   tools:                        # tool events that trigger injection
     - Read
     - Edit
@@ -582,10 +554,9 @@ spec_injection:
   `false/no/0/off`; anything else → stderr warn, default `true`.
 - Non-integer or negative character/window values → stderr warn, default for
   that key.
-- `refresh_window_turns` / `refresh_window_seconds` size the fixed refresh
-  window (§4 Clock): the turns key applies when a transcript is readable, the
-  seconds key is the wall-clock fallback. `0` in a key = never refresh in that
-  clock mode; both `0` = legacy inject-once behavior.
+- `refresh_window_seconds` sizes the fixed wall-clock refresh window (§4).
+  `0` disables time-based reminders; clear/compact reset events still force
+  FULL.
 - `tools` filters which tool events trigger the hook (names as the platform
   reports them). Both grammars are accepted: a block list (`- Edit` items)
   and a flow sequence (`tools: [Edit, Write]`). An **empty list (`[]`, either
@@ -665,11 +636,11 @@ checklists, no change to sub-agent JSONL curation or its budgets.
 | Spec file unreadable | stderr warn, skipped |
 | Spec file over 10 MiB | stderr warn, degraded to an index line (never read+hashed) |
 | Refresh state unwritable (open/create fails) | circuit breaker: the event runs stateless ticket-only — bounded cost, never a FULL re-emission loop |
-| Refresh state unreadable but writable | reads as empty → FULL (the inject direction) |
+| Refresh state read fails after open | circuit breaker: stateless ticket-only; stale emission state is not trusted |
 | State append fails after emission | stderr warn, emission stands |
 | No resolvable identity (stateless tier) | ticket-only every hit, zero state I/O |
-| Transcript unreadable / oversized (> 64 MiB) | fall back to the wall-clock (seconds) window |
-| Subagent transcript absent for an `agent_id` event | wall clock — never the parent's counts |
+| SessionStart reset has no resolvable identity | stderr warn, no state write, exit 0 |
+| SessionStart reset state is unwritable | no state write, exit 0; later tool events retain their normal circuit breaker |
 | Matching/decision engine unimportable | hook degrades to nothing, exit 0 |
 | Hook internal bug | top-level try/except → exit 0, no output |
 | Payload near ceiling | budget enforced on the assembled payload string — ≤ 9,500 characters with separators, index block, summary and tickets all counted; overflow index lines collapse into a `(+N more …)` summary, itself budget-checked |
@@ -686,8 +657,8 @@ checklists, no change to sub-agent JSONL curation or its budgets.
   within the refresh window emits nothing; once the window elapses the next
   touch emits a compact `<spec-ticket>` reminder instead of the body; editing
   the spec itself re-emits it in full (hash beats window); a `/compact`
-  between touches re-emits it in full too (boundary beats window — the text
-  is gone).
+  between touches produces `SessionStart(source=compact)`, so the next touch
+  re-emits it in full (reset beats window — the text is gone).
 - Base: a project with zero frontmatter specs — every touch produces exit 0
   with empty stdout; the only observable delta is one fast subprocess per
   Read/Edit/Write.
@@ -712,10 +683,8 @@ decision-engine cases import `common/spec_inject.py` directly):
 - Frontmatter parsing: no-frontmatter file, BOM tolerance, quotes and inline
   comments, unknown keys ignored, block-scalar `description: >` tolerated,
   stray list items ignored, `paths:` scalar / block scalar raising.
-- Clock: beat counting for BOTH transcript kinds — real user turns in a main
-  transcript (tool-result and `isMeta` lines excluded), assistant messages in
-  a subagent transcript (its user turns are frozen at 1) — plus boundary
-  counting, prefilter behavior, oversized transcript → None.
+- Refresh: wall-clock inside/edge/past/negative cases; reset mismatch beats
+  the window; a legacy v2 emission without `reset` mismatches the first marker.
 - Frontmatter robustness: flow-sequence `paths: [a, b]`; an unterminated
   block at the head bound warns + skips; an hr-opening prose file is silently
   not-frontmatter; case-insensitive glob match on darwin/win32 (IGNORECASE).
@@ -725,14 +694,14 @@ valid-JSON-or-empty stdout; set `TRELLIS_SPEC_STATE_DIR` per run for
 hermeticity):
 
 - first touch → FULL `<spec-context>` with a `sha256` attr; second touch within
-  the beats window → empty; touch past the fixture-controlled window →
+  the wall-clock window → empty; touch past the fixture-controlled window →
   `<spec-ticket>` carrying the same sha; spec content edited between touches →
-  FULL again (hash beats window); a `compact_boundary` appended between
-  touches → FULL again (boundary beats window).
+  FULL again (hash beats window); `SessionStart(source=clear|compact)` between
+  touches → FULL again (reset beats window); `source=startup` does not reset.
 - no-identity payload → ticket-only every hit with the **stateless wording**,
   zero state files; `agent_id` present keeps state separate from the same
-  `session_id` without it and reads the subagent's derived transcript for the
-  clock; `Read` triggers exactly like `Edit`; `spec_injection.tools` filter
+  `session_id` without it while sharing the base lifecycle reset; `Read`
+  triggers exactly like `Edit`; `spec_injection.tools` filter
   respected (incl. empty list = never trigger).
 - state lands under `TRELLIS_SPEC_STATE_DIR` as one `<identity>.jsonl` per
   identity with `v:2` records; stale conforming shards pruned by GC,
@@ -755,7 +724,8 @@ Template shape:
 - `shared-hooks.test.ts`: capability-table integrity + `ALL_HOOK_FILES`
   enumeration includes `inject-spec-context.py`.
 - Claude settings template asserts the single `PostToolUse` entry with matcher
-  `"Read|Edit|Write|MultiEdit"`.
+  `"Read|Edit|Write|MultiEdit"`, plus the reset hook after clear and compact
+  but not startup.
 
 ---
 
@@ -786,9 +756,9 @@ Template shape:
   failure mode is the bounded ticket-only circuit breaker, never silence.
 - Don't count budgets in bytes — the platform ceiling is characters, and byte
   caps make CJK specs pay 3×.
-- Don't measure the refresh window in raw transcript lines — tool results
-  inflate line counts by an order of magnitude; count beats (§4 Clock: real
-  user turns in a main session, assistant messages in a subagent).
+- Don't parse Claude transcripts for refresh or compaction state — their
+  format and write timing are internal implementation details. Use documented
+  lifecycle events.
 - Don't symlink specs into code directories (rationale in §9).
 - Don't register the hook on a new platform without verifying its tool-event
   hook consumes `additionalContext` (see grok: hook exists, output ignored).
@@ -801,8 +771,8 @@ Template shape:
 - Glob token semantics, the glob→regex translation, or the deny-list
 - Budget defaults, character accounting, or the assumed platform ceiling
   (re-verify the documented limit)
-- The decision engine (FULL / TICKET / silent state machine), the compaction
-  rule, or the refresh-window clock semantics (both beat definitions included)
+- The decision engine (FULL / TICKET / silent state machine), lifecycle reset
+  rule, or wall-clock refresh semantics
 - Identity ladder tiers, sanitization, or the subagent `agent_id` split
 - Refresh state schema, location, locking, the circuit breaker, or the GC
   scope/window

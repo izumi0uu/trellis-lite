@@ -52,16 +52,27 @@ describe("settingsTemplate SessionStart matchers", () => {
     expect(matchers).toContain("compact");
   });
 
-  it("all SessionStart entries invoke the same session-start.py hook", () => {
-    for (const entry of sessionStartEntries) {
-      expect(entry.hooks).toHaveLength(1);
-      expect(entry.hooks[0].command).toContain("session-start.py");
+  it("runs the reset hook only after clear and compact", () => {
+    const byMatcher = Object.fromEntries(
+      sessionStartEntries.map((entry) => [entry.matcher, entry.hooks]),
+    );
+    expect(byMatcher.startup.map((hook) => hook.command)).toEqual([
+      "{{PYTHON_CMD}} .claude/hooks/session-start.py",
+    ]);
+    for (const source of ["clear", "compact"]) {
+      expect(byMatcher[source].map((hook) => hook.command)).toEqual([
+        "{{PYTHON_CMD}} .claude/hooks/session-start.py",
+        "{{PYTHON_CMD}} .claude/hooks/inject-spec-context.py",
+      ]);
+      expect(byMatcher[source][1].timeout).toBe(30);
     }
   });
 
   it("all SessionStart entries use {{PYTHON_CMD}} placeholder", () => {
     for (const entry of sessionStartEntries) {
-      expect(entry.hooks[0].command).toContain("{{PYTHON_CMD}}");
+      for (const hook of entry.hooks) {
+        expect(hook.command).toContain("{{PYTHON_CMD}}");
+      }
     }
   });
 });

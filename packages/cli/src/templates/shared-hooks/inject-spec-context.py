@@ -22,7 +22,7 @@ Behavior — per matched spec, per event (recency-decay aware):
     if stateless:               emit TICKET  # bounded cost, always
     elif last is None:          emit FULL    # first time this session
     elif last.sha256 != h:      emit FULL    # spec changed → re-teach
-    elif compacted since last:  emit FULL    # the text is gone, re-teach
+    elif reset since last:      emit FULL    # the text is gone, re-teach
     elif within window:         silent       # fixed window; no state append
     else:                       emit TICKET  # refresh attention cheaply
 
@@ -45,17 +45,11 @@ unwritable state dir → stateless: no state IO at all, every hit is a TICKET
 
 State: user-global, out of the repo, one append-only JSONL file per identity
 under ${TRELLIS_SPEC_STATE_DIR:-~/.trellis/spec-inject}/<project16>/<identity>.jsonl.
-A best-effort fcntl lock is held across read→decide→append; where fcntl is
-unavailable (Windows) the short O_APPEND writes stay atomic enough and the
-worst case is a duplicate injection. All state IO degrades toward emitting.
+SessionStart(clear|compact) appends an opaque reset marker to the base session
+shard; parent and subagent emission histories stay separate but observe that
+shared marker. A best-effort fcntl lock is held across read→decide→append;
+where fcntl is unavailable (Windows) the worst case is a duplicate injection.
 A once-per-hour GC prunes conforming shards older than 48 h.
-
-Clock: conversation beats (and /compact boundaries) counted from the agent's
-own transcript — the subagent's own file when the event carries an agent_id,
-never the parent's. A beat is a real user turn in a main transcript and an
-assistant message in a subagent transcript (a subagent's user turns are frozen
-at 1 forever, so they cannot measure anything). No readable transcript → wall
-clock.
 
 Budget (config.yaml `spec_injection:`): per-spec cap `max_spec_chars`
 (default 9400) with code-point truncation + in-body notice; per-event cap
@@ -65,11 +59,9 @@ is exhausted, remaining FULL bodies degrade to one <spec-index> block; tickets
 are counted last and dropped (with a stderr warning) only if even they do not
 fit.
 
-Refresh windows (config.yaml `spec_injection:`): `refresh_window_turns`
-(default 30; beats of the agent's own transcript) and
-`refresh_window_seconds` (default 2700; wall-clock fallback). Either `0` =
-never refresh in that clock mode (both `0` reproduces the legacy inject-once
-behavior).
+Refresh window (config.yaml `spec_injection:`): `refresh_window_seconds`
+(default 2700; `0` = never refresh unchanged content solely because time
+passed).
 
 Never blocks, never crashes: non-matching events, missing file_path, no
 matches, any internal error → exit 0 with no stdout (stderr warnings allowed).
@@ -86,6 +78,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
 
 # IMPORTANT: Force UTF-8 on Windows for the streams this hook uses.
@@ -130,8 +123,7 @@ DEFAULT_EDIT_TOOLS = ("Read", "Edit", "Write", "MultiEdit")
 DEFAULT_MAX_SPEC_CHARS = 9400
 DEFAULT_MAX_TOTAL_CHARS = 9500
 
-# Refresh-window defaults. `0` (either key) = never refresh in that clock mode.
-DEFAULT_REFRESH_WINDOW_TURNS = 30
+# Refresh-window default. `0` = never refresh solely because time passed.
 DEFAULT_REFRESH_WINDOW_SECONDS = 2700
 
 # State-file base dir (overridable for tests / hermeticity) and GC policy.
@@ -149,10 +141,6 @@ GC_PROJECT_DIR_RE = re.compile(r"^[0-9a-f]{16}$")
 # `+` is part of the identity charset: subagent shards use the `+a-<agent_id>`
 # suffix (contract amendment 2 — without it those shards were never pruned).
 GC_SHARD_NAME_RE = re.compile(r"^[A-Za-z0-9_+-]+(\.[0-9]+)?\.jsonl$")
-
-# Subagent ids are uuid-shaped; anything else is not used to build a path.
-AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-
 
 def _warn(message: str) -> None:
     print(f"[inject-spec-context] WARN: {message}", file=sys.stderr)
@@ -227,9 +215,9 @@ def _parse_tools(raw: object) -> tuple[str, ...] | None:
 
 def get_spec_injection_settings(
     root: Path,
-) -> tuple[bool, int, int, int, int, tuple[str, ...]]:
+) -> tuple[bool, int, int, int, tuple[str, ...]]:
     """Return (enabled, max_spec_chars, max_total_chars,
-    refresh_window_turns, refresh_window_seconds, tools).
+    refresh_window_seconds, tools).
 
     Reads the ``spec_injection:`` section of ``.trellis/config.yaml``:
 
@@ -237,7 +225,6 @@ def get_spec_injection_settings(
           enabled: true
           max_spec_chars: 9400
           max_total_chars: 9500
-          refresh_window_turns: 30
           refresh_window_seconds: 2700
           tools:
             - Read
@@ -257,7 +244,6 @@ def get_spec_injection_settings(
     numbers = {
         "max_spec_chars": DEFAULT_MAX_SPEC_CHARS,
         "max_total_chars": DEFAULT_MAX_TOTAL_CHARS,
-        "refresh_window_turns": DEFAULT_REFRESH_WINDOW_TURNS,
         "refresh_window_seconds": DEFAULT_REFRESH_WINDOW_SECONDS,
     }
 
@@ -317,7 +303,6 @@ def get_spec_injection_settings(
         enabled,
         numbers["max_spec_chars"],
         numbers["max_total_chars"],
-        numbers["refresh_window_turns"],
         numbers["refresh_window_seconds"],
         tools,
     )
@@ -374,17 +359,22 @@ def _shared_context_key(root: Path, payload: dict) -> str | None:
         return None
 
 
-def resolve_identity(root: Path, payload: dict) -> tuple[str, bool]:
-    """Return (identity, stateless) for the refresh-state store.
+def resolve_base_identity(root: Path, payload: dict) -> tuple[str, bool]:
+    """Return the base session identity for reset and refresh state.
 
-    The session/window key is delegated to the shared resolver (see
-    ``_shared_context_key``); a subagent suffix keeps parent and subagent
-    state separate (their contexts are not shared — a spec shown to one was
-    never seen by the other). When the shared resolver is unavailable (older
-    installed scripts tree), a minimal payload-only ladder keeps the hook
-    working. stateless=True means no state IO at all (every hit is a TICKET).
+    When the shared resolver is unavailable (older installed scripts tree), a
+    minimal payload-only ladder keeps the hook working. ``stateless=True``
+    means no state IO is possible.
     """
-    key = _shared_context_key(root, payload)
+    identity_payload = payload
+    if payload.get("hook_event_name") == "SessionStart":
+        # In this event `source` means startup/clear/compact, not platform.
+        # The shared resolver also accepts a generic `source` platform hint,
+        # so remove the lifecycle field to keep the same session identity as
+        # later PostToolUse events.
+        identity_payload = dict(payload)
+        identity_payload.pop("source", None)
+    key = _shared_context_key(root, identity_payload)
 
     if not key:
         # Minimal payload-only fallback for scripts trees that predate
@@ -405,46 +395,7 @@ def resolve_identity(root: Path, payload: dict) -> tuple[str, bool]:
     if not key:
         return "", True
 
-    identity = _sanitize(key)
-    agent = _agent_id(payload)
-    if agent:
-        # Parent and subagent do NOT share context — keep state separate.
-        # The suffix is appended AFTER each part is sanitized, and _sanitize
-        # maps "+" to "-", so no id value can forge the separator.
-        identity += "+a-" + _sanitize(agent)
-    return identity, False
-
-
-# =============================================================================
-# Clock source (subagent-aware)
-# =============================================================================
-
-
-def clock_transcript_path(payload: dict) -> str | None:
-    """Transcript whose turns/boundaries measure THIS agent's context.
-
-    With an ``agent_id``, that is the subagent's own transcript, which Claude
-    Code writes next to the parent's as
-    ``<dir>/<parent stem>/subagents/agent-<agent_id>.jsonl``. If that file is
-    absent we return None (→ wall clock) and never fall back to the parent's
-    counts: the parent idles while the subagent works, so its clock would
-    under-count and under-inject — the unacceptable direction.
-    """
-    raw = payload.get("transcript_path")
-    transcript = raw.strip() if isinstance(raw, str) else ""
-
-    agent = _agent_id(payload)
-    if not agent:
-        return transcript or None
-
-    if not transcript or not AGENT_ID_RE.match(agent):
-        return None
-    try:
-        parent = Path(transcript)
-        candidate = parent.parent / parent.stem / "subagents" / f"agent-{agent}.jsonl"
-        return str(candidate) if candidate.is_file() else None
-    except OSError:
-        return None
+    return _sanitize(key), False
 
 
 # =============================================================================
@@ -565,13 +516,18 @@ def unlock_shard(fd: int) -> None:
         pass
 
 
-def load_state(fd: int, state_version: int) -> dict[str, dict]:
+def load_state(
+    fd: int,
+    state_version: int,
+) -> tuple[dict[str, dict], str | None] | None:
     """Read the shard through the already-open fd; newest record per spec wins
     (``ts`` decides, and on an exact tie the later line in the file does —
     appends are ordered, and two records one float apart must not resolve to
-    the older one). Malformed lines and foreign schema versions are skipped
-    silently. Fail-open to {} (which drives injection, not silence)."""
+    the older one). The latest reset marker is returned separately. Malformed
+    lines and foreign schema versions are skipped silently; read failures
+    return None so the caller uses stateless ticket mode."""
     result: dict[str, dict] = {}
+    latest_reset: str | None = None
     try:
         os.lseek(fd, 0, os.SEEK_SET)
         chunks: list[bytes] = []
@@ -581,7 +537,7 @@ def load_state(fd: int, state_version: int) -> dict[str, dict]:
                 break
             chunks.append(chunk)
     except OSError:
-        return result
+        return None
 
     text = b"".join(chunks).decode("utf-8", errors="replace")
     for line in text.splitlines():
@@ -597,13 +553,18 @@ def load_state(fd: int, state_version: int) -> dict[str, dict]:
         if record.get("v") != state_version:
             continue
         spec = record.get("spec")
+        reset = record.get("reset")
+        if not isinstance(spec, str):
+            if isinstance(reset, str) and reset:
+                latest_reset = reset
+            continue
         ts = record.get("ts")
-        if not isinstance(spec, str) or not isinstance(ts, (int, float)):
+        if not isinstance(ts, (int, float)):
             continue
         previous = result.get(spec)
         if previous is None or ts >= previous.get("ts", float("-inf")):
             result[spec] = record
-    return result
+    return result, latest_reset
 
 
 def append_records(fd: int, records: list[dict]) -> None:
@@ -634,8 +595,62 @@ def main() -> int:
     if not isinstance(input_data, dict):
         return 0
 
+    cwd = input_data.get("cwd") or os.getcwd()
+    root = find_trellis_root(Path(cwd))
+    if root is None:
+        return 0
+    # Bail out before any spec scan when the project has no spec directory.
+    if not (root / DIR_WORKFLOW / DIR_SPEC).is_dir():
+        return 0
+
+    (
+        enabled,
+        max_spec_chars,
+        max_total_chars,
+        win_seconds,
+        tools,
+    ) = get_spec_injection_settings(root)
+    if not enabled:
+        return 0
+
+    _scripts_dir_on_path(root)
+    try:
+        from common.spec_inject import STATE_VERSION  # type: ignore[import-not-found]
+    except Exception:
+        return 0
+
+    if input_data.get("hook_event_name") == "SessionStart":
+        if input_data.get("source") not in ("clear", "compact"):
+            return 0
+        base_identity, stateless = resolve_base_identity(root, input_data)
+        if stateless:
+            _warn("SessionStart reset has no stable session identity")
+            return 0
+        base_dir = _state_base_dir()
+        _maybe_gc(base_dir)
+        reset_path = base_dir / _project_id(root) / f"{base_identity}.jsonl"
+        reset_fd = open_shard(reset_path)
+        if reset_fd is None:
+            return 0
+        try:
+            lock_shard(reset_fd)
+            append_records(
+                reset_fd,
+                [{"v": STATE_VERSION, "reset": uuid.uuid4().hex, "ts": time.time()}],
+            )
+        finally:
+            unlock_shard(reset_fd)
+            try:
+                os.close(reset_fd)
+            except OSError:
+                pass
+        return 0
+
     tool_name = input_data.get("tool_name", "") or input_data.get("toolName", "")
     if not isinstance(tool_name, str) or not tool_name:
+        return 0
+    # An empty `tools` list is the documented "disable every trigger" switch.
+    if not tools or tool_name not in tools:
         return 0
 
     # snake_case is Claude Code's shape; camelCase keeps parity with the
@@ -650,37 +665,13 @@ def main() -> int:
         return 0
     file_path = file_path.strip()
 
-    cwd = input_data.get("cwd") or os.getcwd()
-    root = find_trellis_root(Path(cwd))
-    if root is None:
-        return 0
-    # Bail out before any spec scan when the project has no spec directory.
-    if not (root / DIR_WORKFLOW / DIR_SPEC).is_dir():
-        return 0
-
-    (
-        enabled,
-        max_spec_chars,
-        max_total_chars,
-        win_turns,
-        win_seconds,
-        tools,
-    ) = get_spec_injection_settings(root)
-    # An empty `tools` list is the documented "disable every trigger" switch.
-    if not enabled or not tools or tool_name not in tools:
-        return 0
-
-    _scripts_dir_on_path(root)
     try:
         from common.spec_match import (  # type: ignore[import-not-found]
             match_specs_for_file,
             normalize_repo_relative,
         )
         from common.spec_inject import (  # type: ignore[import-not-found]
-            STATE_VERSION,
             assemble_payload,
-            scan_transcript,
-            select_beats,
         )
     except Exception:
         return 0  # matching/decision engine unavailable — degrade to nothing
@@ -689,32 +680,58 @@ def main() -> int:
     if not matches:
         return 0
 
-    identity, stateless = resolve_identity(root, input_data)
+    base_identity, stateless = resolve_base_identity(root, input_data)
+    identity = base_identity
+    agent = _agent_id(input_data)
+    if agent:
+        identity += "+a-" + _sanitize(agent)
 
     state_records: dict[str, dict] = {}
-    clock = {"turns": None, "boundaries": None, "ts": time.time()}
+    clock = {"reset": None, "ts": time.time()}
     fd: int | None = None
 
     if not stateless:
         base_dir = _state_base_dir()
         _maybe_gc(base_dir)
-        shard_path = base_dir / _project_id(root) / f"{identity}.jsonl"
-        fd = open_shard(shard_path)
-        if fd is None:
+        project_dir = base_dir / _project_id(root)
+        base_fd = open_shard(project_dir / f"{base_identity}.jsonl")
+        if base_fd is None:
             # Circuit breaker: unwritable state → ticket-only for this event.
             stateless = True
         else:
-            lock_shard(fd)
-            state_records = load_state(fd, STATE_VERSION)
-            counts = scan_transcript(clock_transcript_path(input_data))
-            clock = {
-                # Beats of THIS agent's transcript: assistant messages for a
-                # subagent (its user turns are frozen at 1), real user turns
-                # for a main session.
-                "turns": select_beats(counts, bool(_agent_id(input_data))),
-                "boundaries": counts["boundaries"] if counts else None,
-                "ts": time.time(),
-            }
+            lock_shard(base_fd)
+            base_snapshot = load_state(base_fd, STATE_VERSION)
+            if base_snapshot is None:
+                stateless = True
+                unlock_shard(base_fd)
+                os.close(base_fd)
+            else:
+                base_records, reset_id = base_snapshot
+                if identity == base_identity:
+                    fd = base_fd
+                    state_records = base_records
+                else:
+                    unlock_shard(base_fd)
+                    os.close(base_fd)
+                    fd = open_shard(project_dir / f"{identity}.jsonl")
+                    if fd is None:
+                        stateless = True
+                    else:
+                        lock_shard(fd)
+                        snapshot = load_state(fd, STATE_VERSION)
+                        if snapshot is None:
+                            stateless = True
+                            unlock_shard(fd)
+                            os.close(fd)
+                            fd = None
+                        else:
+                            state_records, _ = snapshot
+
+                if not stateless:
+                    clock = {
+                        "reset": reset_id,
+                        "ts": time.time(),
+                    }
 
     edited_rel = normalize_repo_relative(root, file_path) or str(file_path).replace(
         "\\", "/"
@@ -728,7 +745,6 @@ def main() -> int:
             clock,
             max_spec_chars,
             max_total_chars,
-            win_turns,
             win_seconds,
         )
         if fd is not None and records:

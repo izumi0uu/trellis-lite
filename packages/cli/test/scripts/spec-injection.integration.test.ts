@@ -1,12 +1,9 @@
 /**
- * Integration tests for path-scoped on-demand spec injection (v2 ticket-refresh,
- * post-review contract R1–R7, audit-fix contract F1–F13).
+ * Integration tests for path-scoped on-demand spec injection (v2 ticket-refresh
+ * with lifecycle-event reset state).
  *
- * Tests carrying an `F<n>:` prefix pin a fixed audit finding: F1 subagent
- * beats, F2 collision-free identity, F3 the one canonical normalization, F4
- * frontmatter robustness, F5 config-surface honesty, F6 named-index reserve +
- * honest tickets, F7 GC containment, F8 fail-soft scan, F9 platform-neutral
- * input, F10 state tie-break, F13 the §12-required cases.
+ * Tests carrying an `F<n>:` prefix pin a fixed audit finding that remains
+ * relevant after the transcript clock was removed.
  *
  * Covers four surfaces:
  *   - `src/templates/trellis/scripts/common/spec_match.py` — glob→regex
@@ -15,11 +12,10 @@
  *   - `src/templates/trellis/scripts/common/spec_inject.py` — the pure decision
  *     engine (R7): `decide` truth table, `within_window`, `truncate_chars`,
  *     `assemble_payload`'s hard character ceiling
- *   - `src/templates/shared-hooks/inject-spec-context.py` — PostToolUse hook
- *     E2E: character budgets (R1), the real-turn / compact-boundary transcript
- *     clock (R2), the subagent clock (R3), the pid-less locked state file (R4),
- *     the unwritable-state circuit breaker and scoped GC (R5), stateless ticket
- *     wording and the `tools` config gate (R6)
+ *   - `src/templates/shared-hooks/inject-spec-context.py` — PostToolUse and
+ *     SessionStart hook E2E: character budgets, lifecycle reset markers,
+ *     parent/subagent state, the pid-less locked state file, the unwritable
+ *     circuit breaker and scoped GC, stateless ticket wording and tools config
  *   - `get_context.py --mode spec --file <path>` — pull mode
  *
  * Scripts are stamped into a fresh temp dir and exercised through the real
@@ -103,12 +99,12 @@ function listJsonl(dir: string): string[] {
 
 interface StateRecord {
   v: number;
-  spec: string;
-  sha256: string;
-  mode: string;
+  spec?: string;
+  sha256?: string;
+  mode?: string;
   ts: number;
-  turns: number | null;
-  boundaries: number | null;
+  reset?: string;
+  complete?: boolean;
 }
 
 function readShardRecords(shard: string): StateRecord[] {
@@ -166,8 +162,6 @@ from common.spec_inject import (
     make_record,
     render_full,
     render_ticket,
-    scan_transcript,
-    select_beats,
     truncate_chars,
     truncation_notice,
     within_window,
@@ -310,157 +304,6 @@ function fullBlockBody(ctx: string): string {
     throw new Error(`expected exactly one <spec-context> block: ${ctx.slice(0, 200)}`);
   }
   return m[1];
-}
-
-// ---------------------------------------------------------------------------
-// Transcript fixtures (R2/R3): the four line shapes the turn clock must
-// discriminate, written exactly as Claude Code's JSON.stringify emits them
-// (no space after the `"type":` colon — the hook's byte prefilter).
-// ---------------------------------------------------------------------------
-
-const LINE = {
-  /** A real user turn: type=user, string message.content, no isMeta. */
-  userTurn: (text: string): string =>
-    JSON.stringify({ type: "user", message: { role: "user", content: text } }),
-  /** A tool_result carrier: type=user but structured content → not a turn. */
-  toolResult: (): string =>
-    JSON.stringify({
-      type: "user",
-      message: {
-        role: "user",
-        content: [
-          { type: "tool_result", tool_use_id: "toolu_01", content: "ok" },
-        ],
-      },
-    }),
-  /** A meta line: type=user, string content, but isMeta → not a turn. */
-  meta: (): string =>
-    JSON.stringify({
-      type: "user",
-      isMeta: true,
-      message: {
-        role: "user",
-        content: "<system-reminder>injected noise</system-reminder>",
-      },
-    }),
-  /** Assistant output: never a turn. */
-  assistant: (): string =>
-    JSON.stringify({
-      type: "assistant",
-      message: { role: "assistant", content: [{ type: "text", text: "sure" }] },
-    }),
-  /** The append-only marker /compact leaves behind. */
-  compactBoundary: (): string =>
-    JSON.stringify({ type: "system", subtype: "compact_boundary" }),
-};
-
-function userTurns(count: number, tag = "t"): string[] {
-  return Array.from({ length: count }, (_, i) => LINE.userTurn(`${tag}-${i}`));
-}
-
-// ---------------------------------------------------------------------------
-// F1: subagent transcript fixtures. Field sets mirror real Claude Code
-// subagent records (verified against ~/.claude/projects/*/*/subagents/*.jsonl
-// on this machine): every line carries `agentId` + `isSidechain: true`, the
-// prompt is the ONLY line with string `message.content`, tool results come
-// back as `type: "user"` lines with an ARRAY content, and the agent loop's
-// beat is the `type: "assistant"` line.
-// ---------------------------------------------------------------------------
-
-const SUB_LINE = {
-  /** The single real user turn a subagent transcript ever has: its prompt. */
-  prompt: (agentId: string, text: string): string =>
-    JSON.stringify({
-      parentUuid: null,
-      isSidechain: true,
-      promptId: "109383d9-6c43-44b8-b7ba-84a7ff838d8c",
-      agentId,
-      type: "user",
-      message: { role: "user", content: text },
-      uuid: "76afc8db-3082-466e-8af4-fb58f3e0e22a",
-      timestamp: "2026-07-17T15:09:58.480Z",
-      userType: "external",
-      entrypoint: "claude-desktop",
-      cwd: "/repo",
-      sessionId: "5f96bd1d-46a1-4148-9b48-1f18c4dfde94",
-      version: "2.1.209",
-      gitBranch: "main",
-    }),
-  /** One agent-loop iteration — the subagent's conversation beat. */
-  assistant: (agentId: string, i: number): string =>
-    JSON.stringify({
-      parentUuid: "76afc8db-3082-466e-8af4-fb58f3e0e22a",
-      isSidechain: true,
-      agentId,
-      message: {
-        model: "claude-fable-5",
-        id: `msg_011Cd7qovLZNoQ22JbMmrT${i}`,
-        type: "message",
-        role: "assistant",
-        content: [{ type: "tool_use", id: `toolu_${i}`, name: "Read", input: {} }],
-        stop_reason: "tool_use",
-        stop_sequence: null,
-        usage: { input_tokens: 2, output_tokens: 340 },
-      },
-      requestId: `req_011Cd7qotALhtEpcVLnnx${i}`,
-      attributionAgent: "general-purpose",
-      type: "assistant",
-      uuid: `cd64e3d0-c581-418c-a311-c4ce67dbfb${i}`,
-      timestamp: "2026-07-17T15:10:03.930Z",
-      userType: "external",
-      entrypoint: "claude-desktop",
-      cwd: "/repo",
-      sessionId: "5f96bd1d-46a1-4148-9b48-1f18c4dfde94",
-      version: "2.1.209",
-      gitBranch: "main",
-    }),
-  /** A tool result: type=user with ARRAY content → never a real user turn. */
-  toolResult: (agentId: string, i: number): string =>
-    JSON.stringify({
-      parentUuid: `cd64e3d0-c581-418c-a311-c4ce67dbfb${i}`,
-      isSidechain: true,
-      promptId: "109383d9-6c43-44b8-b7ba-84a7ff838d8c",
-      agentId,
-      type: "user",
-      message: {
-        role: "user",
-        content: [
-          {
-            tool_use_id: `toolu_${i}`,
-            type: "tool_result",
-            content: "ok",
-            is_error: false,
-          },
-        ],
-      },
-      uuid: `92725496-ae8e-4745-947d-1a4ab43c46a${i}`,
-      sourceToolAssistantUUID: `cd64e3d0-c581-418c-a311-c4ce67dbfb${i}`,
-      timestamp: "2026-07-17T15:10:04.030Z",
-      userType: "external",
-      entrypoint: "claude-desktop",
-      cwd: "/repo",
-      sessionId: "5f96bd1d-46a1-4148-9b48-1f18c4dfde94",
-      version: "2.1.209",
-      gitBranch: "main",
-    }),
-};
-
-/** `count` agent-loop iterations (assistant line + its tool result), numbered
- * from `from` so appended batches keep distinct uuids. */
-function subagentBeats(agentId: string, count: number, from = 0): string[] {
-  return Array.from({ length: count }, (_, i) => [
-    SUB_LINE.assistant(agentId, from + i),
-    SUB_LINE.toolResult(agentId, from + i),
-  ]).flat();
-}
-
-function writeTranscript(file: string, lines: string[]): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, lines.map((l) => l + "\n").join(""), "utf-8");
-}
-
-function appendTranscript(file: string, lines: string[]): void {
-  fs.appendFileSync(file, lines.map((l) => l + "\n").join(""), "utf-8");
 }
 
 function runGetContext(
@@ -829,11 +672,7 @@ for g in ["/abs/path.ts", "a/../b.ts", "src\\\\win.ts", "", "src/app.ts"]:
 
   describe("common/spec_match.py: match_specs_for_file", () => {
     it("ranks exact and narrower globs before broad globs; rel_path breaks ties", () => {
-      writeSpec(
-        tmp,
-        "aa-broad.md",
-        "---\npaths:\n  - src/**\n---\nBody\n",
-      );
+      writeSpec(tmp, "aa-broad.md", "---\npaths:\n  - src/**\n---\nBody\n");
       writeSpec(tmp, "guides/style.md", "# Plain spec without frontmatter\n");
       writeSpec(
         tmp,
@@ -881,9 +720,11 @@ for g in ["/abs/path.ts", "a/../b.ts", "src\\\\win.ts", "", "src/app.ts"]:
 
   describe("common/spec_match.py: canonical normalization (F3)", () => {
     /** rel_path list + the canonical rel for (root, file), one per line. */
-    function probeNormalization(
-      pairs: [string, string][],
-    ): { status: number | null; stdout: string; stderr: string } {
+    function probeNormalization(pairs: [string, string][]): {
+      status: number | null;
+      stdout: string;
+      stderr: string;
+    } {
       return runSpecProbe(
         tmp,
         `
@@ -964,38 +805,39 @@ for root, f in ${JSON.stringify(pairs)}:
   // ===========================================================================
 
   describe("common/spec_inject.py: pure decision logic (R7)", () => {
-    it("decide() follows the frozen order: stateless → first → sha → boundary → window", () => {
+    it("decide() follows the order: stateless → first → sha → reset → window", () => {
       const r = runInjectProbe(
         tmp,
         `
-CLOCK = {"turns": 10, "boundaries": 2, "ts": 1000.0}
+CLOCK = {"reset": "r2", "ts": 1000.0}
 SAME = "a" * 64
 OTHER = "b" * 64
 
 def last(**kw):
     base = {"v": 2, "spec": "s.md", "sha256": SAME, "mode": "full",
-            "ts": 1000.0, "turns": 10, "boundaries": 2}
+            "ts": 1000.0, "reset": "r2"}
     base.update(kw)
     return base
 
 rows = [
     # stateless wins over everything, even a matching record
-    ("stateless-no-record", decide(True, None, SAME, CLOCK, 30, 2700)),
-    ("stateless-with-record", decide(True, last(), SAME, CLOCK, 30, 2700)),
+    ("stateless-no-record", decide(True, None, SAME, CLOCK, 2700)),
+    ("stateless-with-record", decide(True, last(), SAME, CLOCK, 2700)),
     # first sight of this spec in this identity
-    ("first-sight", decide(False, None, SAME, CLOCK, 30, 2700)),
+    ("first-sight", decide(False, None, SAME, CLOCK, 2700)),
     # content changed → re-teach, even deep inside the window
-    ("sha-change", decide(False, last(sha256=OTHER), SAME, CLOCK, 30, 2700)),
-    # compaction since the emission → the text is gone, re-teach
-    ("boundary-jump", decide(False, last(boundaries=1), SAME, CLOCK, 30, 2700)),
-    # a boundary count that did NOT grow is not a compaction
-    ("boundary-equal", decide(False, last(boundaries=2), SAME, CLOCK, 30, 2700)),
-    # inside the turn window → stay silent
-    ("within-window", decide(False, last(turns=8), SAME, CLOCK, 30, 2700)),
-    # past the turn window → cheap refresh
-    ("past-window", decide(False, last(turns=0), SAME, CLOCK, 5, 2700)),
-    # sha change beats the boundary rule and the window alike
-    ("sha-change-past-window", decide(False, last(turns=0, sha256=OTHER), SAME, CLOCK, 5, 2700)),
+    ("sha-change", decide(False, last(sha256=OTHER), SAME, CLOCK, 2700)),
+    # SessionStart(clear/compact) wrote a new reset marker → re-teach
+    ("reset-change", decide(False, last(reset="r1"), SAME, CLOCK, 2700)),
+    # Legacy v2 emissions have no reset field and are stale after the first reset
+    ("legacy-after-reset", decide(False, last(reset=None), SAME, CLOCK, 2700)),
+    # Same reset marker and inside the wall-clock window → stay silent
+    ("reset-equal", decide(False, last(), SAME, CLOCK, 2700)),
+    ("within-window", decide(False, last(ts=900.0), SAME, CLOCK, 2700)),
+    # Past the wall-clock window → cheap refresh
+    ("past-window", decide(False, last(ts=0.0), SAME, CLOCK, 5)),
+    # sha change beats reset and window checks
+    ("sha-change-past-window", decide(False, last(ts=0.0, sha256=OTHER), SAME, CLOCK, 5)),
 ]
 for name, value in rows:
     print(f"{name}={value}")
@@ -1007,35 +849,26 @@ for name, value in rows:
         "stateless-with-record=ticket",
         "first-sight=full",
         "sha-change=full",
-        "boundary-jump=full",
-        "boundary-equal=silent",
+        "reset-change=full",
+        "legacy-after-reset=full",
+        "reset-equal=silent",
         "within-window=silent",
         "past-window=ticket",
         "sha-change-past-window=full",
       ]);
     });
 
-    it("within_window: turns beat seconds, 0 means infinite, negative deltas are past-window", () => {
+    it("within_window uses wall-clock seconds; 0 means infinite", () => {
       const r = runInjectProbe(
         tmp,
         `
 rows = [
-    # turn clock present on both sides → seconds are not consulted
-    ("turns-inside", within_window({"turns": 5, "ts": 9e9}, {"turns": 3, "ts": 0.0}, 30, 1)),
-    ("turns-at-edge", within_window({"turns": 33, "ts": 0.0}, {"turns": 3, "ts": 0.0}, 30, 2700)),
-    ("turns-past", within_window({"turns": 34, "ts": 0.0}, {"turns": 3, "ts": 0.0}, 30, 2700)),
-    # a shrunken/replaced transcript is a clock anomaly, not a /compact signal:
-    # negative delta → past-window (the over-inject side of the asymmetry)
-    ("turns-negative", within_window({"turns": 1, "ts": 0.0}, {"turns": 40, "ts": 0.0}, 30, 2700)),
-    ("seconds-negative", within_window({"turns": None, "ts": 10.0}, {"turns": None, "ts": 5000.0}, 30, 2700)),
-    # 0 = never refresh in that clock mode → infinite window
-    ("turns-window-zero", within_window({"turns": 9999, "ts": 0.0}, {"turns": 1, "ts": 0.0}, 0, 2700)),
-    ("seconds-window-zero", within_window({"turns": None, "ts": 9e9}, {"turns": None, "ts": 1.0}, 30, 0)),
-    # no turn clock → seconds fallback
-    ("seconds-inside", within_window({"turns": None, "ts": 100.0}, {"turns": None, "ts": 1.0}, 30, 2700)),
-    ("seconds-past", within_window({"turns": None, "ts": 5000.0}, {"turns": None, "ts": 1.0}, 30, 2700)),
-    # neither clock comparable → past-window
-    ("incomparable", within_window({"turns": None, "ts": None}, {"turns": None, "ts": None}, 30, 2700)),
+    ("inside", within_window({"ts": 100.0}, {"ts": 1.0}, 2700)),
+    ("at-edge", within_window({"ts": 2701.0}, {"ts": 1.0}, 2700)),
+    ("past", within_window({"ts": 5000.0}, {"ts": 1.0}, 2700)),
+    ("negative", within_window({"ts": 10.0}, {"ts": 5000.0}, 2700)),
+    ("window-zero", within_window({"ts": 9e9}, {"ts": 1.0}, 0)),
+    ("missing", within_window({"ts": None}, {"ts": None}, 2700)),
 ]
 for name, value in rows:
     print(f"{name}={int(value)}")
@@ -1043,16 +876,12 @@ for name, value in rows:
       );
       expect(r.status, r.stderr).toBe(0);
       expect(r.stdout.trim().split("\n")).toEqual([
-        "turns-inside=1",
-        "turns-at-edge=0",
-        "turns-past=0",
-        "turns-negative=0",
-        "seconds-negative=0",
-        "turns-window-zero=1",
-        "seconds-window-zero=1",
-        "seconds-inside=1",
-        "seconds-past=0",
-        "incomparable=0",
+        "inside=1",
+        "at-edge=0",
+        "past=0",
+        "negative=0",
+        "window-zero=1",
+        "missing=0",
       ]);
     });
 
@@ -1101,11 +930,11 @@ for i in range(6):
     )
     specs.append(Cand(p, rel, f"spec number {i}"))
 
-CLOCK = {"turns": 1, "boundaries": 0, "ts": 1.0}
+CLOCK = {"reset": None, "ts": 1.0}
 for budget in (0, 50, 120, 200, 300, 500, 800, 1200, 2000, 5000):
     for stateless in (False, True):
         payload, records = assemble_payload(
-            "src/app.ts", specs, stateless, {}, CLOCK, 0, budget, 30, 2700
+            "src/app.ts", specs, stateless, {}, CLOCK, 0, budget, 2700
         )
         over = budget > 0 and len(payload) > budget
         print(f"{budget}/{int(stateless)}={'OVER:' + str(len(payload)) if over else 'ok'}")
@@ -1117,135 +946,19 @@ for budget in (0, 50, 120, 200, 300, 500, 800, 1200, 2000, 5000):
       expect(lines.filter((l) => l.includes("OVER"))).toEqual([]);
     });
 
-    it("scan_transcript returns all three counters (turns, assistant_turns, boundaries)", () => {
-      const transcript = path.join(tmp, "scan.jsonl");
-      writeTranscript(transcript, [
-        ...userTurns(2),
-        LINE.toolResult(),
-        LINE.meta(),
-        LINE.assistant(),
-        LINE.assistant(),
-        LINE.compactBoundary(),
-        "not json at all",
-        ...userTurns(1, "x"),
-      ]);
-
+    it("make_record emits the v2 schema with the active reset marker", () => {
       const r = runInjectProbe(
         tmp,
         `
-counts = scan_transcript(${JSON.stringify(transcript)})
-print(",".join(sorted(counts)))
-print(f"turns={counts['turns']} assistant={counts['assistant_turns']} boundaries={counts['boundaries']}")
-print("missing=%s" % scan_transcript("${path.join(tmp, "nope.jsonl").replace(/\\/g, "/")}"))
-print("empty-path=%s" % scan_transcript(""))
-print("none-path=%s" % scan_transcript(None))
-print("over-cap=%s" % scan_transcript(${JSON.stringify(transcript)}, max_bytes=10))
-`,
-      );
-      expect(r.status, r.stderr).toBe(0);
-      expect(r.stdout.trim().split("\n")).toEqual([
-        "assistant_turns,boundaries,turns",
-        "turns=3 assistant=2 boundaries=1",
-        "missing=None",
-        "empty-path=None",
-        "none-path=None",
-        "over-cap=None",
-      ]);
-    });
-
-    it("F1: select_beats reads assistant messages for a subagent, user turns for a main session", () => {
-      const r = runInjectProbe(
-        tmp,
-        `
-counts = {"turns": 1, "assistant_turns": 41, "boundaries": 0}
-print("main=%s" % select_beats(counts, False))
-print("subagent=%s" % select_beats(counts, True))
-print("no-transcript-main=%s" % select_beats(None, False))
-print("no-transcript-subagent=%s" % select_beats(None, True))
-`,
-      );
-      expect(r.status, r.stderr).toBe(0);
-      expect(r.stdout.trim().split("\n")).toEqual([
-        "main=1",
-        // A subagent transcript is frozen at its single prompt turn forever
-        // (verified against 60/60 real subagent transcripts on this machine),
-        // so its beats are the agent loop's assistant messages.
-        "subagent=41",
-        "no-transcript-main=None",
-        "no-transcript-subagent=None",
-      ]);
-    });
-
-    it("F8: hostile transcript content degrades the scan instead of raising", () => {
-      const transcript = path.join(tmp, "hostile.jsonl");
-      writeTranscript(transcript, [
-        ...userTurns(1),
-        // Carries the prefilter substring but parses to a str, not a record:
-        // the counters are decided on the PARSED value, never the substring.
-        JSON.stringify('{"type":"user"} pretending to be a record'),
-        // Same, as a list.
-        '[{"type":"assistant"}]',
-        // Unparseable line.
-        '{"type":"user", broken',
-        LINE.assistant(),
-      ]);
-
-      const r = runInjectProbe(
-        tmp,
-        `
-counts = scan_transcript(${JSON.stringify(transcript)})
-print(f"turns={counts['turns']} assistant={counts['assistant_turns']} boundaries={counts['boundaries']}")
-# An embedded NUL makes open() raise ValueError, not OSError: before F8 that
-# escaped scan_transcript and aborted the whole injection event.
-print("nul-path=%s" % scan_transcript("/tmp/tr\\x00.jsonl"))
-`,
-      );
-      expect(r.status, r.stderr).toBe(0);
-      expect(r.stdout.trim().split("\n")).toEqual([
-        "turns=1 assistant=1 boundaries=0",
-        "nul-path=None",
-      ]);
-    });
-
-    it("amendment 4: the prefilter tolerates a space after the colon", () => {
-      // A producer emitting '"type": "user"' must not silently count zero
-      // turns forever (the turn clock would then never refresh).
-      const transcript = path.join(tmp, "spaced.jsonl");
-      fs.writeFileSync(
-        transcript,
-        [
-          '{"type": "user", "message": {"content": "hello"}}',
-          '{"type": "user", "message": {"content": ["tool_result"]}}',
-          '{"type": "user", "isMeta": true, "message": {"content": "m"}}',
-          '{"type":"user","message":{"content":"compact style"}}',
-        ].join("\n") + "\n",
-        "utf-8",
-      );
-
-      const r = runInjectProbe(
-        tmp,
-        `
-counts = scan_transcript(${JSON.stringify(transcript)})
-print(f"turns={counts['turns']} boundaries={counts['boundaries']}")
-`,
-      );
-      expect(r.status, r.stderr).toBe(0);
-      expect(r.stdout.trim()).toBe("turns=2 boundaries=0");
-    });
-
-    it("make_record emits the v2 schema (turns + boundaries, no pid)", () => {
-      const r = runInjectProbe(
-        tmp,
-        `
-rec = make_record(".trellis/spec/a.md", "f" * 64, "full", {"turns": 4, "boundaries": 1, "ts": 12.5})
+rec = make_record(".trellis/spec/a.md", "f" * 64, "full", {"reset": "r-1", "ts": 12.5})
 print(",".join(sorted(rec.keys())))
-print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={rec['boundaries']}")
+print(f"v={rec['v']} version={STATE_VERSION} reset={rec['reset']}")
 `,
       );
       expect(r.status, r.stderr).toBe(0);
       expect(r.stdout.trim().split("\n")).toEqual([
-        "boundaries,mode,sha256,spec,ts,turns,v",
-        "v=2 version=2 turns=4 boundaries=1",
+        "mode,reset,sha256,spec,ts,v",
+        "v=2 version=2 reset=r-1",
       ]);
     });
   });
@@ -1303,9 +1016,70 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
       expect(second.status).toBe(0);
       expect(second.stdout.trim()).toBe("");
 
+      const shard = soleShard(tmp);
+      const record = readShardRecords(shard)[0];
+      fs.writeFileSync(
+        shard,
+        JSON.stringify({ ...record, ts: 0 }) + "\n",
+        "utf-8",
+      );
+      const refresh = runHook(tmp, payload);
+      const refreshContext = additionalContext(refresh.stdout);
+      expect(refreshContext).toContain("<spec-ticket");
+      expect(refreshContext).toContain(STATEFUL_TICKET_BODY);
+
       // State landed under TRELLIS_SPEC_STATE_DIR, not in the repo's .runtime.
       expect(listJsonl(stateBase(tmp)).length).toBeGreaterThan(0);
       expect(fs.existsSync(path.join(tmp, ".trellis", ".runtime"))).toBe(false);
+    });
+
+    it("re-teaches the full spec after SessionStart(source=compact)", () => {
+      writeGoverningSpec();
+      const payload = buildPayload(tmp, { filePath: EDITED });
+
+      const first = runHook(tmp, payload);
+      expect(first.status).toBe(0);
+      expect(additionalContext(first.stdout)).toContain("<spec-context");
+
+      const compact = runHook(
+        tmp,
+        JSON.stringify({
+          hook_event_name: "SessionStart",
+          source: "compact",
+          cwd: tmp,
+          session_id: "sess-1",
+        }),
+      );
+      expect(compact.status).toBe(0);
+      expect(compact.stdout.trim()).toBe("");
+
+      const second = runHook(tmp, payload);
+      expect(second.status).toBe(0);
+      expect(additionalContext(second.stdout)).toContain("<spec-context");
+
+      const third = runHook(tmp, payload);
+      expect(third.status).toBe(0);
+      expect(third.stdout.trim()).toBe("");
+    });
+
+    it("does not read transcript contents to measure the refresh window", () => {
+      writeGoverningSpec();
+      const transcript = path.join(tmp, "internal.jsonl");
+      fs.writeFileSync(transcript, "opaque internal data\n", "utf-8");
+      const payload = buildPayload(tmp, {
+        filePath: EDITED,
+        transcriptPath: transcript,
+      });
+
+      const first = runHook(tmp, payload);
+      expect(first.status).toBe(0);
+      expect(additionalContext(first.stdout)).toContain("<spec-context");
+
+      fs.appendFileSync(transcript, "changed\n".repeat(100), "utf-8");
+
+      const second = runHook(tmp, payload);
+      expect(second.status).toBe(0);
+      expect(second.stdout.trim()).toBe("");
     });
 
     it("re-teaches the full spec when its content changes (sha change beats the window)", () => {
@@ -1582,7 +1356,8 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         // are all counted against it.
         for (let i = 0; i < 20; i++) {
           const id = String(i).padStart(2, "0");
-          const description = "governing rule detail ".repeat(18).slice(0, 400) + id;
+          const description =
+            "governing rule detail ".repeat(18).slice(0, 400) + id;
           writeSpec(
             tmp,
             `many-${id}.md`,
@@ -1668,234 +1443,116 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
       });
     });
 
-    // -----------------------------------------------------------------------
-    // R2: the clock counts real user turns and compact boundaries
-    // -----------------------------------------------------------------------
-
-    describe("R2: real-turn transcript clock", () => {
-      it("tool results, isMeta lines and assistant output do not advance the window; real turns do", () => {
+    describe("SessionStart reset lifecycle", () => {
+      it("source=startup leaves existing exposure state intact", () => {
         writeGoverningSpec();
-        writeConfig(tmp, ["spec_injection:", "  refresh_window_turns: 3"]);
+        const payload = buildPayload(tmp, { filePath: EDITED });
 
-        const transcript = path.join(tmp, "transcript.jsonl");
-        writeTranscript(transcript, userTurns(1, "a"));
-        const payload = buildPayload(tmp, {
-          filePath: EDITED,
-          transcriptPath: transcript,
-        });
-
-        const first = runHook(tmp, payload);
-        expect(first.status).toBe(0);
-        expect(additionalContext(first.stdout)).toContain(
-          `<spec-context file="${EDITED}"`,
+        expect(additionalContext(runHook(tmp, payload).stdout)).toContain(
+          "<spec-context",
         );
-        expect(readShardRecords(soleShard(tmp))[0].turns).toBe(1);
-
-        // 12 lines of pure noise: none of them is a real user turn, so the
-        // window has not moved and the hook must stay silent.
-        appendTranscript(transcript, [
-          ...Array.from({ length: 4 }, () => LINE.toolResult()),
-          ...Array.from({ length: 4 }, () => LINE.meta()),
-          ...Array.from({ length: 4 }, () => LINE.assistant()),
-        ]);
-
-        const second = runHook(tmp, payload);
-        expect(second.status).toBe(0);
-        expect(second.stdout.trim()).toBe("");
-        expect(readShardRecords(soleShard(tmp)).length).toBe(1);
-
-        // Three REAL turns cross the window → cheap refresh, stateful wording.
-        appendTranscript(transcript, userTurns(3, "b"));
-
-        const third = runHook(tmp, payload);
-        expect(third.status).toBe(0);
-        const ctx = additionalContext(third.stdout);
-        expect(ctx).toContain(
-          `<spec-ticket file="${EDITED}" spec="${SPEC_REL}" sha256="`,
+        const startup = runHook(
+          tmp,
+          JSON.stringify({
+            hook_event_name: "SessionStart",
+            source: "startup",
+            cwd: tmp,
+            session_id: "sess-1",
+          }),
         );
-        expect(ctx).toContain(STATEFUL_TICKET_BODY);
-        expect(ctx).toContain("</spec-ticket>");
-        // A ticket is a small pointer, not the full spec body.
-        expect(ctx).not.toContain("Command spec body.");
-
-        const records = readShardRecords(soleShard(tmp));
-        expect(records.length).toBe(2);
-        expect(records[1].mode).toBe("ticket");
-        expect(records[1].turns).toBe(4);
+        expect(startup.status).toBe(0);
+        expect(startup.stdout.trim()).toBe("");
+        expect(runHook(tmp, payload).stdout.trim()).toBe("");
+        expect(readShardRecords(soleShard(tmp)).every((r) => r.spec)).toBe(
+          true,
+        );
       });
 
-      it("a compact_boundary appended after a FULL forces another FULL with the same sha", () => {
+      it("source=clear re-teaches the full spec on the next touch", () => {
         writeGoverningSpec();
-        // A window wide enough that only the boundary rule can trigger a
-        // re-emission (2 turns of drift stays far inside 100).
-        writeConfig(tmp, ["spec_injection:", "  refresh_window_turns: 100"]);
+        const payload = buildPayload(tmp, { filePath: EDITED });
 
-        const transcript = path.join(tmp, "transcript.jsonl");
-        writeTranscript(transcript, userTurns(1, "a"));
-        const payload = buildPayload(tmp, {
-          filePath: EDITED,
-          transcriptPath: transcript,
-        });
-
-        const first = runHook(tmp, payload);
-        expect(first.status).toBe(0);
-        const firstCtx = additionalContext(first.stdout);
-        expect(firstCtx).toContain(`<spec-context file="${EDITED}"`);
-        const sha = requireSha(firstCtx);
-        expect(readShardRecords(soleShard(tmp))[0].boundaries).toBe(0);
-
-        // /compact APPENDS a boundary marker (transcripts never shrink): the
-        // injected text is genuinely gone, so a ticket would be wrong here.
-        appendTranscript(transcript, [
-          LINE.compactBoundary(),
-          ...userTurns(1, "post"),
-        ]);
+        expect(additionalContext(runHook(tmp, payload).stdout)).toContain(
+          "<spec-context",
+        );
+        const clear = runHook(
+          tmp,
+          JSON.stringify({
+            hook_event_name: "SessionStart",
+            source: "clear",
+            cwd: tmp,
+            session_id: "sess-1",
+          }),
+        );
+        expect(clear.status).toBe(0);
+        expect(clear.stdout.trim()).toBe("");
 
         const second = runHook(tmp, payload);
-        expect(second.status).toBe(0);
-        const ctx = additionalContext(second.stdout);
-        expect(ctx).toContain(
-          `<spec-context file="${EDITED}" spec="${SPEC_REL}" sha256="${sha}">`,
-        );
-        expect(ctx).toContain("Command spec body.");
-        expect(ctx).not.toContain("<spec-ticket");
-
-        const records = readShardRecords(soleShard(tmp));
-        expect(records.map((r) => r.mode)).toEqual(["full", "full"]);
-        expect(records[1].boundaries).toBe(1);
+        expect(additionalContext(second.stdout)).toContain("<spec-context");
+        expect(runHook(tmp, payload).stdout.trim()).toBe("");
       });
     });
 
-    // -----------------------------------------------------------------------
-    // R3: with an agent_id the clock is the SUBAGENT's own transcript
-    // -----------------------------------------------------------------------
+    it("shares lifecycle resets across parent and subagent exposure histories", () => {
+      writeGoverningSpec();
+      const parentPayload = buildPayload(tmp, { filePath: EDITED });
+      const subagentPayload = buildPayload(tmp, {
+        filePath: EDITED,
+        agentId: "sub7",
+      });
 
-    describe("R3: subagent clock", () => {
-      /** Claude Code's derived layout: <dir>/<parent stem>/subagents/agent-<id>.jsonl */
-      function subagentTranscript(parent: string, agentId: string): string {
-        return path.join(
-          path.dirname(parent),
-          path.basename(parent, ".jsonl"),
-          "subagents",
-          `agent-${agentId}.jsonl`,
-        );
+      expect(additionalContext(runHook(tmp, parentPayload).stdout)).toContain(
+        "<spec-context",
+      );
+      expect(additionalContext(runHook(tmp, subagentPayload).stdout)).toContain(
+        "<spec-context",
+      );
+
+      const reset = runHook(
+        tmp,
+        JSON.stringify({
+          hook_event_name: "SessionStart",
+          source: "compact",
+          cwd: tmp,
+          session_id: "sess-1",
+        }),
+      );
+      expect(reset.status).toBe(0);
+      expect(reset.stdout.trim()).toBe("");
+
+      expect(additionalContext(runHook(tmp, parentPayload).stdout)).toContain(
+        "<spec-context",
+      );
+      expect(additionalContext(runHook(tmp, subagentPayload).stdout)).toContain(
+        "<spec-context",
+      );
+      expect(runHook(tmp, parentPayload).stdout.trim()).toBe("");
+      expect(runHook(tmp, subagentPayload).stdout.trim()).toBe("");
+
+      const shards = listJsonl(stateBase(tmp));
+      expect(shards.map((shard) => path.basename(shard)).sort()).toEqual([
+        "session_sess-1+a-sub7.jsonl",
+        "session_sess-1.jsonl",
+      ]);
+      const parentShard = shards.find(
+        (shard) => path.basename(shard) === "session_sess-1.jsonl",
+      );
+      const subagentShard = shards.find(
+        (shard) => path.basename(shard) === "session_sess-1+a-sub7.jsonl",
+      );
+      if (!parentShard || !subagentShard) {
+        throw new Error("expected parent and subagent state shards");
       }
-
-      it("F1: beats tick on the subagent's assistant messages, never the idle parent", () => {
-        writeGoverningSpec();
-        writeConfig(tmp, ["spec_injection:", "  refresh_window_turns: 3"]);
-
-        const parent = path.join(tmp, "sess.jsonl");
-        const sub = subagentTranscript(parent, "sub7");
-        writeTranscript(parent, userTurns(1, "p"));
-        // Real subagent shape: one string-content prompt line, then agent-loop
-        // iterations (assistant line + array-content tool_result line).
-        writeTranscript(sub, [
-          SUB_LINE.prompt("sub7", "Implement the thing."),
-          ...subagentBeats("sub7", 2),
-        ]);
-
-        const payload = buildPayload(tmp, {
-          filePath: EDITED,
-          transcriptPath: parent,
-          agentId: "sub7",
-        });
-
-        const first = runHook(tmp, payload);
-        expect(first.status).toBe(0);
-        expect(additionalContext(first.stdout)).toContain(
-          `<spec-context file="${EDITED}"`,
-        );
-        // Two assistant beats — NOT the one frozen user prompt (a subagent's
-        // user turns never move, so they cannot measure the window).
-        expect(readShardRecords(soleShard(tmp))[0].turns).toBe(2);
-
-        // The parent races ahead (50 real turns) while the subagent's own
-        // context barely moved: reading the parent here would fire a spurious
-        // refresh. The subagent clock keeps it silent.
-        appendTranscript(parent, userTurns(50, "p2"));
-        // …and one more subagent beat stays inside the 3-beat window.
-        appendTranscript(sub, subagentBeats("sub7", 1, 2));
-
-        const second = runHook(tmp, payload);
-        expect(second.status).toBe(0);
-        expect(second.stdout.trim()).toBe("");
-
-        // Now the SUBAGENT crosses its own window → ticket.
-        appendTranscript(sub, subagentBeats("sub7", 4, 3));
-
-        const third = runHook(tmp, payload);
-        expect(third.status).toBe(0);
-        const ctx = additionalContext(third.stdout);
-        expect(ctx).toContain(`<spec-ticket file="${EDITED}"`);
-        expect(readShardRecords(soleShard(tmp))[1].turns).toBe(7);
-      });
-
-      it("F1: a main-session transcript keeps ticking on user turns, not assistant lines", () => {
-        writeGoverningSpec();
-        writeConfig(tmp, ["spec_injection:", "  refresh_window_turns: 3"]);
-
-        const transcript = path.join(tmp, "sess.jsonl");
-        writeTranscript(transcript, userTurns(1, "a"));
-        // No agent_id → main-session semantics, unchanged by F1.
-        const payload = buildPayload(tmp, {
-          filePath: EDITED,
-          transcriptPath: transcript,
-        });
-
-        expect(runHook(tmp, payload).status).toBe(0);
-        expect(readShardRecords(soleShard(tmp))[0].turns).toBe(1);
-
-        // Ten assistant messages would be ten beats for a subagent; here they
-        // are not turns at all, so the window has not moved.
-        appendTranscript(
-          transcript,
-          Array.from({ length: 10 }, () => LINE.assistant()),
-        );
-
-        const second = runHook(tmp, payload);
-        expect(second.status).toBe(0);
-        expect(second.stdout.trim()).toBe("");
-        expect(readShardRecords(soleShard(tmp)).length).toBe(1);
-      });
-
-      it("falls back to the wall clock when the derived subagent transcript is absent", () => {
-        writeGoverningSpec();
-        // A tight turn window plus an infinite seconds window: if the parent's
-        // turns leaked into the clock the second run would emit a ticket.
-        writeConfig(tmp, [
-          "spec_injection:",
-          "  refresh_window_turns: 1",
-          "  refresh_window_seconds: 0",
-        ]);
-
-        const parent = path.join(tmp, "sess.jsonl");
-        writeTranscript(parent, userTurns(1, "p"));
-        expect(fs.existsSync(subagentTranscript(parent, "ghost"))).toBe(false);
-
-        const payload = buildPayload(tmp, {
-          filePath: EDITED,
-          transcriptPath: parent,
-          agentId: "ghost",
-        });
-
-        const first = runHook(tmp, payload);
-        expect(first.status).toBe(0);
-        expect(additionalContext(first.stdout)).toContain(
-          `<spec-context file="${EDITED}"`,
-        );
-        // No turn clock at all — not the parent's count.
-        const record = readShardRecords(soleShard(tmp))[0];
-        expect(record.turns).toBeNull();
-        expect(record.boundaries).toBeNull();
-
-        appendTranscript(parent, userTurns(50, "p2"));
-
-        const second = runHook(tmp, payload);
-        expect(second.status).toBe(0);
-        expect(second.stdout.trim()).toBe("");
-        expect(readShardRecords(soleShard(tmp)).length).toBe(1);
-      });
+      const parent = readShardRecords(parentShard);
+      const subagent = readShardRecords(subagentShard);
+      const resetId = parent.find((record) => !record.spec)?.reset;
+      expect(resetId).toMatch(/^[0-9a-f]{32}$/);
+      expect(parent.filter((record) => record.spec).at(-1)?.reset).toBe(
+        resetId,
+      );
+      expect(subagent.filter((record) => record.spec).at(-1)?.reset).toBe(
+        resetId,
+      );
     });
 
     // -----------------------------------------------------------------------
@@ -1918,7 +1575,7 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         expect(path.dirname(path.dirname(shard))).toBe(stateBase(tmp));
       });
 
-      it("records carry the frozen v2 schema (turns + boundaries, no pid, no lines)", () => {
+      it("records carry the v2 emission schema without transcript counters", () => {
         writeGoverningSpec();
 
         const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED }));
@@ -1929,12 +1586,10 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         expect(records.length).toBe(1);
         const record = records[0];
         expect(Object.keys(record).sort()).toEqual([
-          "boundaries",
           "mode",
           "sha256",
           "spec",
           "ts",
-          "turns",
           "v",
         ]);
         expect(record.v).toBe(2);
@@ -1942,9 +1597,10 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         expect(record.sha256).toMatch(/^[0-9a-f]{64}$/);
         expect(record.mode).toBe("full");
         expect(typeof record.ts).toBe("number");
-        // No transcript_path → no turn clock.
-        expect(record.turns).toBeNull();
-        expect(record.boundaries).toBeNull();
+        expect(record).not.toHaveProperty("turns");
+        expect(record).not.toHaveProperty("boundaries");
+        expect(record).not.toHaveProperty("pid");
+        expect(record).not.toHaveProperty("lines");
       });
 
       it("two sequential events share one file and append only for emissions", () => {
@@ -2029,7 +1685,9 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         // subagent shard (identity carries the `+a-<agent_id>` suffix —
         // contract amendment 2 added `+` to the name class so these prune).
         const pruned = write(path.join(projectDir, "session_old.jsonl"));
-        const prunedLegacy = write(path.join(projectDir, "session_old.111.jsonl"));
+        const prunedLegacy = write(
+          path.join(projectDir, "session_old.111.jsonl"),
+        );
         const prunedSubagent = write(
           path.join(projectDir, "session_old+a-abc123.jsonl"),
         );
@@ -2131,7 +1789,10 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         const shared = "x".repeat(130);
 
         for (const session of [`${shared}-alpha`, `${shared}-beta`]) {
-          const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED, session }));
+          const r = runHook(
+            tmp,
+            buildPayload(tmp, { filePath: EDITED, session }),
+          );
           expect(r.status).toBe(0);
           // Each is a first sight for its own identity → full teach.
           expect(additionalContext(r.stdout)).toContain("<spec-context");
@@ -2151,7 +1812,10 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         writeGoverningSpec();
 
         for (const session of ["a.b", "a_b"]) {
-          const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED, session }));
+          const r = runHook(
+            tmp,
+            buildPayload(tmp, { filePath: EDITED, session }),
+          );
           expect(r.status).toBe(0);
           expect(additionalContext(r.stdout)).toContain("<spec-context");
         }
@@ -2223,7 +1887,10 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         writeConfig(tmp, ["spec_injection:", "  tools: []"]);
 
         for (const toolName of ["Edit", "Read", "Write", "MultiEdit"]) {
-          const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED, toolName }));
+          const r = runHook(
+            tmp,
+            buildPayload(tmp, { filePath: EDITED, toolName }),
+          );
           expect(r.status).toBe(0);
           expect(r.stdout.trim()).toBe("");
         }
@@ -2244,14 +1911,19 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         // Read is not in the list → still silent.
         const read = runHook(
           tmp,
-          buildPayload(tmp, { filePath: EDITED, toolName: "Read", session: "s2" }),
+          buildPayload(tmp, {
+            filePath: EDITED,
+            toolName: "Read",
+            session: "s2",
+          }),
         );
         expect(read.status).toBe(0);
         expect(read.stdout.trim()).toBe("");
       });
 
       it("max_spec_chars: 0 means unlimited — the whole body, and the whole remaining budget", () => {
-        const header = "---\ndescription: big spec\npaths:\n  - src/app.ts\n---\n";
+        const header =
+          "---\ndescription: big spec\npaths:\n  - src/app.ts\n---\n";
         const content = header + "R".repeat(30000) + "\n";
         writeSpec(tmp, "big.md", content);
 
@@ -2261,7 +1933,10 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
           "  max_spec_chars: 0",
           "  max_total_chars: 0",
         ]);
-        const unlimited = runHook(tmp, buildPayload(tmp, { filePath: "src/app.ts" }));
+        const unlimited = runHook(
+          tmp,
+          buildPayload(tmp, { filePath: "src/app.ts" }),
+        );
         expect(unlimited.status).toBe(0);
         const unlimitedCtx = additionalContext(unlimited.stdout);
         expect(fullBlockBody(unlimitedCtx)).toBe(content);
@@ -2284,7 +1959,8 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
       it("a spec over MAX_SPEC_SOURCE_BYTES degrades to an index line with a warn", () => {
         // 10 MiB+ of spec is never inlinable; reading and hashing it on every
         // tool event is the cost the bound exists to refuse.
-        const header = "---\ndescription: huge spec\npaths:\n  - src/app.ts\n---\n";
+        const header =
+          "---\ndescription: huge spec\npaths:\n  - src/app.ts\n---\n";
         const abs = writeSpec(tmp, "huge.md", header);
         fs.appendFileSync(abs, Buffer.alloc(11 * 1024 * 1024, 0x48));
         expect(fs.statSync(abs).size).toBeGreaterThan(10 * 1024 * 1024);
@@ -2362,28 +2038,25 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
             "R".repeat(30000) +
             "\n",
         );
-        writeConfig(tmp, ["spec_injection:", "  refresh_window_turns: 3"]);
-
-        const transcript = path.join(tmp, "sess.jsonl");
-        writeTranscript(transcript, userTurns(1, "a"));
-        const payload = buildPayload(tmp, {
-          filePath: EDITED,
-          transcriptPath: transcript,
-        });
+        writeConfig(tmp, ["spec_injection:", "  refresh_window_seconds: 1"]);
+        const payload = buildPayload(tmp, { filePath: EDITED });
 
         const first = runHook(tmp, payload);
         expect(first.status).toBe(0);
         const firstCtx = additionalContext(first.stdout);
         expect(firstCtx).toContain("[Trellis: truncated at");
-        const record = readShardRecords(soleShard(tmp))[0] as StateRecord & {
-          complete?: boolean;
-        };
+        const shard = soleShard(tmp);
+        const record = readShardRecords(shard)[0];
         expect(record.mode).toBe("full");
         expect(record.complete).toBe(false);
 
         // Past the window: an unqualified ticket would claim prior exposure to
         // a body the agent never saw, so the spec is taught again instead.
-        appendTranscript(transcript, userTurns(4, "b"));
+        fs.writeFileSync(
+          shard,
+          JSON.stringify({ ...record, ts: 0 }) + "\n",
+          "utf-8",
+        );
 
         const second = runHook(tmp, payload);
         expect(second.status).toBe(0);
@@ -2418,58 +2091,9 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         const r = runHook(tmp, buildPayload(tmp, { filePath: EDITED }));
         expect(r.status).toBe(0);
         expect(additionalContext(r.stdout)).not.toContain("truncated at");
-        expect(
-          Object.keys(readShardRecords(soleShard(tmp))[0]),
-        ).not.toContain("complete");
-      });
-    });
-
-    // -----------------------------------------------------------------------
-    // F8 / F9 / F10: fail-soft scan, platform-neutral input, state tie-break
-    // -----------------------------------------------------------------------
-
-    describe("F8: a hostile transcript never aborts the event", () => {
-      it("degrades to the wall clock and still injects", () => {
-        writeGoverningSpec();
-        // An embedded NUL makes open() raise ValueError — not OSError — from
-        // inside the scan. Before F8 that escaped and killed the whole event
-        // (no injection at all); now it degrades to the wall clock.
-        const hostile = path.join(tmp, "sess\u0000.jsonl");
-
-        const r = runHook(
-          tmp,
-          buildPayload(tmp, { filePath: EDITED, transcriptPath: hostile }),
+        expect(Object.keys(readShardRecords(soleShard(tmp))[0])).not.toContain(
+          "complete",
         );
-        expect(r.status).toBe(0);
-        expect(additionalContext(r.stdout)).toContain(
-          `<spec-context file="${EDITED}"`,
-        );
-
-        const record = readShardRecords(soleShard(tmp))[0];
-        expect(record.turns).toBeNull();
-        expect(record.boundaries).toBeNull();
-      });
-
-      it("keeps counting around lines that parse to something other than a record", () => {
-        writeGoverningSpec();
-        writeConfig(tmp, ["spec_injection:", "  refresh_window_turns: 2"]);
-
-        const transcript = path.join(tmp, "sess.jsonl");
-        writeTranscript(transcript, [
-          ...userTurns(1, "a"),
-          JSON.stringify('{"type":"user"} pretending to be a record'),
-          '{"type":"user", broken',
-        ]);
-        const payload = buildPayload(tmp, {
-          filePath: EDITED,
-          transcriptPath: transcript,
-        });
-
-        const first = runHook(tmp, payload);
-        expect(first.status).toBe(0);
-        expect(additionalContext(first.stdout)).toContain("<spec-context");
-        // Only the one real turn counted; the impostor lines did not.
-        expect(readShardRecords(soleShard(tmp))[0].turns).toBe(1);
       });
     });
 
@@ -2496,7 +2120,9 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
         // but a warning printed through an un-reconfigured stderr raises
         // UnicodeEncodeError on a non-UTF-8 codepage.
         const source = fs.readFileSync(HOOK_PATH, "utf-8");
-        expect(source).toContain('for _stream_name in ("stdin", "stdout", "stderr"):');
+        expect(source).toContain(
+          'for _stream_name in ("stdin", "stdout", "stderr"):',
+        );
       });
     });
 
@@ -2548,7 +2174,9 @@ print(f"v={rec['v']} version={STATE_VERSION} turns={rec['turns']} boundaries={re
 
       it("a cwd with no .trellis anywhere above it emits nothing", () => {
         writeGoverningSpec();
-        const outside = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-no-root-"));
+        const outside = fs.mkdtempSync(
+          path.join(os.tmpdir(), "trellis-no-root-"),
+        );
         try {
           const payload = JSON.stringify({
             hook_event_name: "PostToolUse",

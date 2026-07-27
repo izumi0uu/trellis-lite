@@ -1175,6 +1175,30 @@ describe("regression: SessionStart reinject on clear/compact (MIN-231)", () => {
       ).toContain("session-start.py");
     }
   });
+
+  it("[MIN-231] clear and compact record a spec reset; startup does not", () => {
+    const settings = JSON.parse(claudeSettingsTemplate);
+    const commandsByMatcher = Object.fromEntries(
+      settings.hooks.SessionStart.map(
+        (entry: { matcher: string; hooks: { command: string }[] }) => [
+          entry.matcher,
+          entry.hooks.map((hook) => hook.command),
+        ],
+      ),
+    );
+    expect(
+      commandsByMatcher.startup.some((command: string) =>
+        command.includes("inject-spec-context.py"),
+      ),
+    ).toBe(false);
+    for (const source of ["clear", "compact"]) {
+      expect(commandsByMatcher[source]).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("inject-spec-context.py"),
+        ]),
+      );
+    }
+  });
 });
 
 describe("regression: agent-session Trellis update hint", () => {
