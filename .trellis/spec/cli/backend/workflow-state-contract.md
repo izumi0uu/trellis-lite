@@ -145,11 +145,9 @@ behavior).
 > **Precedence provenance (2026-07-23 colleague transcript)**: the personal >
 > team layering and "personal not in git, higher priority" come directly from
 > the transcript (16:44:23 team-shared config default; 16:44:39 personal layer,
-> not uploaded to git, higher priority). Two orderings the transcript did **not**
-> pin, chosen here and flagged for confirmation: (a) storing the personal id in
-> the existing gitignored `.developer` file (transcript named the layer, not the
-> file); (b) placing the per-task pin **above** the personal override (explicit
-> task intent beats a developer-wide default). See task
+> not uploaded to git, higher priority). The implementation stores the personal
+> id in the existing gitignored `.developer` key-value file and places an
+> explicit per-task pin above that developer-wide default. See task
 > `07-24-workflow-config-default/prd.md`.
 
 The resolver never raises. The hooks additionally wrap the
@@ -168,9 +166,9 @@ Consumers that resolve per-task:
 | `codex/hooks/session-start.py` + `copilot/hooks/session-start.py` (`_resolve_workflow_md`) | platform-specific SessionStart Phase Index TOC |
 
 Known degradation: the Pi and OMP extensions keep injecting the global
-`.trellis/workflow.md` regardless of task selection (their workflow reads
-live inside monolithic TS extensions); per-task parity there is a tracked
-follow-up.
+`.trellis/workflow.md` regardless of per-task, personal, or team selection
+(their workflow reads live inside monolithic TS extensions). Parity there is a
+tracked follow-up.
 
 Absent a per-task pin **and** the personal/team default keys, every consumer
 resolves to the global `.trellis/workflow.md` — output is byte-identical to a

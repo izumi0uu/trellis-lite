@@ -940,7 +940,10 @@ describe("opencode inject-workflow-state layered default (parity with Python)", 
   });
 
   it("team default routes the breadcrumb to the team variant", async () => {
-    writeFileSync(join(dir, ".trellis", "config.yaml"), "default_workflow: tdd\n");
+    writeFileSync(
+      join(dir, ".trellis", "config.yaml"),
+      'default_workflow: "tdd"  # team default\n',
+    );
     const text = await breadcrumb();
     expect(text).toContain("TDD_BREADCRUMB");
     expect(text).not.toContain("GLOBAL_BREADCRUMB");

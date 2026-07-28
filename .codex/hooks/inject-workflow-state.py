@@ -10,9 +10,10 @@ The emitted ``hookEventName`` field is platform-aware: most hosts expect
 CodeBuddy / Droid / Codex / Copilot wiring), but Gemini CLI 0.40.x renamed
 its per-turn event to ``BeforeAgent`` and its schema validator rejects the
 legacy name. ``_detect_platform`` picks the right value at runtime.
-Breadcrumb text is pulled exclusively from workflow.md
-[workflow-state:STATUS] tag blocks — workflow.md is the single source of
-truth. There are no fallback dicts in this script: when workflow.md is
+Breadcrumb text is pulled exclusively from the resolved workflow file's
+[workflow-state:STATUS] tag blocks. Personal, team, and global defaults are
+resolved in order when the active task has no pin. There are no fallback
+dicts in this script: when the resolved workflow is
 missing or a tag is absent, the breadcrumb degrades to a generic
 "Refer to workflow.md for current step." line so users see (and fix)
 the broken state instead of the hook silently masking it.

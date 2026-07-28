@@ -104,7 +104,7 @@ describe.skipIf(!hasPython())("layered workflow default resolution", () => {
   });
 
   it("team default only -> team variant", () => {
-    setupRepo(tmp, { config: "default_workflow: tdd\n" });
+    setupRepo(tmp, { config: 'default_workflow: "tdd"  # team default\n' });
     expect(resolve(tmp, null)).toBe(".trellis/workflows/tdd.md");
   });
 
@@ -177,5 +177,60 @@ describe.skipIf(!hasPython())("layered workflow default resolution", () => {
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout.trim()).toBe(".trellis/workflows/tdd.md");
     expect(r.stderr).toContain("invalid workflow id");
+  });
+
+  it("task commands create, change, and clear a per-task workflow", () => {
+    setupRepo(tmp, {
+      config: "default_workflow: tdd\n",
+      developer: "name=x\nworkflow=native\n",
+    });
+
+    const env = { ...process.env, TRELLIS_CONTEXT_ID: "workflow-command-test" };
+    const taskScript = path.join(tmp, ".trellis", "scripts", "task.py");
+    const create = spawnSync(
+      "python3",
+      [
+        taskScript,
+        "create",
+        "Workflow command",
+        "--slug",
+        "workflow-command",
+        "--workflow",
+        "channel",
+      ],
+      { cwd: tmp, encoding: "utf-8", env },
+    );
+    expect(create.status, create.stderr).toBe(0);
+
+    const tasksDir = path.join(tmp, ".trellis", "tasks");
+    const taskNames = fs
+      .readdirSync(tasksDir)
+      .filter((name) => fs.existsSync(path.join(tasksDir, name, "task.json")));
+    expect(taskNames).toHaveLength(1);
+    const taskJson = path.join(tasksDir, taskNames[0], "task.json");
+    expect(JSON.parse(fs.readFileSync(taskJson, "utf-8")).workflow).toBe(
+      "channel",
+    );
+
+    const change = spawnSync("python3", [taskScript, "workflow", "tdd"], {
+      cwd: tmp,
+      encoding: "utf-8",
+      env,
+    });
+    expect(change.status, change.stderr).toBe(0);
+    expect(JSON.parse(fs.readFileSync(taskJson, "utf-8")).workflow).toBe("tdd");
+
+    const clear = spawnSync("python3", [taskScript, "workflow", "--clear"], {
+      cwd: tmp,
+      encoding: "utf-8",
+      env,
+    });
+    expect(clear.status, clear.stderr).toBe(0);
+    expect(
+      JSON.parse(fs.readFileSync(taskJson, "utf-8")).workflow,
+    ).toBeUndefined();
+    expect(clear.stdout).toContain(
+      "Effective workflow: .trellis/workflows/native.md",
+    );
   });
 });

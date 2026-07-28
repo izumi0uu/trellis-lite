@@ -273,7 +273,8 @@ def cmd_create(args: argparse.Namespace) -> int:
             print(
                 colored(
                     f"Warning: {DIR_WORKFLOW}/{DIR_WORKFLOWS}/{workflow_id}.md does not exist yet; "
-                    "the global workflow.md is used until it is saved (trellis workflow --save).",
+                    "default workflow resolution is used until it is saved "
+                    "(trellis workflow --save).",
                     Colors.YELLOW,
                 ),
                 file=sys.stderr,

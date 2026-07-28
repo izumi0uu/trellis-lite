@@ -458,7 +458,7 @@ Usage:
   python3 task.py current [--source]                 Show active task
   python3 task.py finish                             Clear active task
   python3 task.py workflow <id>                      Select workflow variant for active task
-  python3 task.py workflow --clear                   Clear selection (use global workflow.md)
+  python3 task.py workflow --clear                   Clear selection (use default resolution)
   python3 task.py set-branch <dir> <branch>          Set git branch
   python3 task.py set-base-branch <dir> <branch>     Set PR target branch
   python3 task.py set-scope <dir> <scope>            Set scope for PR title
@@ -599,7 +599,7 @@ def main() -> int:
     p_workflow = subparsers.add_parser("workflow", help="Set/clear per-task workflow selection")
     p_workflow.add_argument("id", nargs="?", help="Workflow id (.trellis/workflows/<id>.md)")
     p_workflow.add_argument("--clear", action="store_true",
-                            help="Remove the workflow selection (use global workflow.md)")
+                            help="Remove the workflow selection (use default resolution)")
 
     # set-branch
     p_branch = subparsers.add_parser("set-branch", help="Set git branch")

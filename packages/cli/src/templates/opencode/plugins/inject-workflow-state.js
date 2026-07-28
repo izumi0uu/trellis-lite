@@ -11,7 +11,8 @@
  * workflow.md is the single source of truth. When the active task's
  * task.json selects a workflow variant ("workflow": "<id>"), the tag
  * blocks are read from .trellis/workflows/<id>.md instead (missing
- * variant file → one stderr warning + fallback to workflow.md; see
+ * variant file → one stderr warning + fallback through personal/team/global
+ * defaults; see
  * resolveWorkflowMd). There are no fallback
  * tables in this plugin: when workflow.md is missing or a tag is
  * absent, the breadcrumb degrades to a generic

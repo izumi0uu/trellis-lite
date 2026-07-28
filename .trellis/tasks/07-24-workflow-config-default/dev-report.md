@@ -82,14 +82,21 @@
 
 ---
 
-## 5. 诚实的遗留与状态
+## 5. Decisions and deferred work
 
-- **两个假设仍为"待同事确认",未关闭**(与已提交的 `prd.md`、`workflow-state-contract.md` 出处标注保持一致):
-  - (a) **个人层存 `.developer`**:转写 16:44:23–39 只明确了 `.developer` 是"个人层"这个**文件角色**,**并没有**说"把 workflow id 存进 `.developer`"。存哪(复用 `.developer` vs 新开 `.trellis/.workflow-local`)仍是**待定选择**。现实现选 `.developer`(最小复用、向后兼容),待确认。
-  - (b) **任务 pin > 个人层**:转写只规定了"个人 > 团队",**没有**排过"任务 pin vs 个人"的序。现实现让 pin 压过个人(显式任务意图 > 开发者级默认),属**产品选择**,待确认。
-- **per-session 层:确认不做**(用户 2026-07-24 拍板"session 之间不用区分")。研究已证明既有会话文件 `.runtime/sessions/` 在 `task.py finish` 时自删、且依赖脆弱的 session-id 识别,不适合承载"不能丢失"的选择——故不走该路。
-- **Pi / OMP 降级(已知)**:`.pi`/`.omp` 扩展硬编码读全局 `.trellis/workflow.md`,**三个新层(任务/个人/团队)在这两个平台均不生效**。这是 467 就有的 per-task 降级、本任务把它扩到了新层。`workflow-state-contract.md` 的降级注记目前只写了 per-task,**偏窄**(待决定是否拓宽措辞)。
-- **不属于本任务、但记录在案的存疑**:467 的 `trellis workflow --save` 命令可能冗余("用之前先 save"的别扭)——那是 467 的范围,不在本任务 diff 内。
+- **Personal storage:** keep `workflow=<id>` in the existing gitignored
+  `.developer` key-value file. A dedicated local file would duplicate the same
+  ownership and persistence boundary.
+- **Precedence:** an explicit per-task pin stays above the personal default;
+  personal stays above the team default.
+- **Per-session selection:** intentionally omitted. Session runtime files are
+  ephemeral and are not an appropriate persistence layer for this preference.
+- **Selection by task type:** deferred to a separate change. The recorded
+  direction uses workflow frontmatter, but it still needs a deterministic
+  exactly-one-match contract.
+- **Pi / OMP degradation:** these extensions still read the global
+  `.trellis/workflow.md`; per-task, personal, and team selection do not apply
+  there yet. The workflow-state contract now states the full limitation.
 
 ---
 

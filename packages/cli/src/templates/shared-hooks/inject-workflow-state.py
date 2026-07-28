@@ -13,8 +13,8 @@ legacy name. ``_detect_platform`` picks the right value at runtime.
 Breadcrumb text is pulled exclusively from the resolved workflow file's
 [workflow-state:STATUS] tag blocks — the active task may select a
 per-task variant (`.trellis/workflows/<id>.md` via task.json `workflow`),
-otherwise the global workflow.md is the single source of
-truth. There are no fallback dicts in this script: when workflow.md is
+otherwise personal, team, and global defaults are resolved in order.
+There are no fallback dicts in this script: when the resolved workflow is
 missing or a tag is absent, the breadcrumb degrades to a generic
 "Refer to workflow.md for current step." line so users see (and fix)
 the broken state instead of the hook silently masking it.
