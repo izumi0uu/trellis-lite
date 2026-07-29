@@ -271,3 +271,30 @@ Verification commands used across the stages:
       suite passed (CLI 1711; core 333 with 1 skipped), as did lint, typecheck,
       build, and docs lint. OpenCode blocked `WRONG`, returned the governing
       spec to the model, and accepted the corrected retry.
+
+---
+
+# Stage PI — Pi Agent dynamic spec loading (2026-07-29)
+
+- [x] PI1. Verify Pi 0.80.6 `tool_call`, `tool_result`, and
+      `session_compact` contracts from installed official docs, type
+      declarations, and agent-loop source. Confirm blocked reasons become
+      model-visible error tool results.
+- [x] PI2. Add a thin Pi extension adapter for built-in `read`, `write`, and
+      `edit`, preserving the shared Python engine as the only matcher, budget,
+      refresh, reset, and state implementation.
+- [x] PI3. Install and hash-track
+      `.trellis/scripts/inject-spec-context.py` for Pi without creating
+      `.pi/hooks/`.
+- [x] PI4. Add extension-event and configurator coverage for FULL deny/retry,
+      ticket delivery, Read delivery, compact reset, and generated assets.
+- [x] PI5. Update the executable spec and beta EN/ZH documentation.
+- [x] PI6. Run focused/full gates, build and install the CLI in an isolated
+      project, then verify the behavior in a real local Pi session.
+      Focused Pi/configurator tests, lint, Python lint, typecheck, build, and
+      docs lint passed. The full suite passed 2,044 tests with one core skip;
+      one unrelated task-script test timed out under full-suite load and
+      passed immediately when rerun alone. In an isolated project, Pi 0.80.6
+      attempted `PI_SPEC_WRONG`, received `.trellis/spec/pi-smoke.md` as a
+      model-visible blocked tool result, retried, and wrote
+      `PI_SPEC_CORRECT`.

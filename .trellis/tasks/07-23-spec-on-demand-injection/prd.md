@@ -242,3 +242,39 @@ Acceptance:
       ordinary refresh ticket all proceed without blocking.
 - [x] Init and update both install `.opencode/plugins/inject-spec-context.js`
       and `.opencode/hooks/inject-spec-context.py`.
+
+## Pi Agent extension (2026-07-29)
+
+Pi 0.80.6 exposes built-in file paths through `tool_call` and supports
+`{ block: true, reason }`. The agent core converts that reason into an error
+tool result visible to the model, so Trellis can use the same deny-once
+handshake as Codex and OpenCode without modifying user input or the system
+prompt.
+
+Requirements:
+
+1. Intercept built-in `write` and `edit` before execution and adapt
+   `input.path` to the shared Python PreToolUse payload.
+2. Run successful `read` events through the same provider from `tool_result`.
+3. Return FULL context as a blocked-tool reason; append ticket-only context to
+   the matching tool result by `toolCallId`.
+4. Map `session_compact` to `SessionStart(source=compact)`.
+5. Install the shared provider at
+   `.trellis/scripts/inject-spec-context.py`; do not create `.pi/hooks/`.
+6. Missing scripts, subprocess failures, malformed output, and state failures
+   remain fail-open.
+
+Acceptance:
+
+- [x] A fresh governed `write` / `edit` is blocked once with the FULL spec and
+      its retry proceeds.
+- [x] A successful governed `read` receives matching context in its tool
+      result.
+- [x] Ticket-only output does not block and is appended to the matching
+      mutation result.
+- [x] `session_compact` causes the next governed mutation to receive FULL
+      context again.
+- [x] Init and update hash-track the shared provider while `.pi/hooks/`
+      remains absent.
+- [x] A real local Pi session sees the governing rule, corrects its mutation,
+      and completes successfully.

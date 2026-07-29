@@ -399,6 +399,7 @@ export const AI_TOOLS: Record<AITool, AIToolConfig> = {
     name: "Pi Agent",
     templateDirs: ["common", "pi"],
     configDir: ".pi",
+    extraManagedPaths: [".trellis/scripts/inject-spec-context.py"],
     supportsAgentSkills: true,
     cliFlag: "pi",
     defaultChecked: false,

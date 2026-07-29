@@ -74,8 +74,10 @@ export type SharedHookPlatform =
  *   PostToolUse Read/Edit/Write/MultiEdit; Codex and OpenCode use PreToolUse.
  *   Codex passes the native apply_patch payload directly. OpenCode's plugin
  *   adapts write/edit/apply_patch calls and blocks a FULL emission once so the
- *   model sees the specs before retrying. Class-2 platforms use
- *   `get_context.py --mode spec` pull mode instead.
+ *   model sees the specs before retrying. Pi invokes the same provider from
+ *   its TypeScript extension, so its configurator installs the script under
+ *   `.trellis/scripts/` instead of registering Pi in this table. Other
+ *   Class-2 platforms use `get_context.py --mode spec` pull mode instead.
  * - Claude Code `statusLine` is intentionally not installed by default.
  *   Users can add their own statusLine command in `.claude/settings.json`,
  *   or opt in to the Trellis one via `trellis init --with-statusline`

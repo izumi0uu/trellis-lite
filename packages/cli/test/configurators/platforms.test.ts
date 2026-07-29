@@ -1338,6 +1338,11 @@ describe("configurePlatform", () => {
         path.join(tmpDir, ".pi", "extensions", "trellis", "index.ts"),
       ),
     ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".trellis", "scripts", "inject-spec-context.py"),
+      ),
+    ).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, ".pi", "hooks"))).toBe(false);
 
     const extension = fs.readFileSync(
@@ -1368,8 +1373,10 @@ describe("configurePlatform", () => {
     expect(extension).not.toContain("inject-workflow-state.py");
     expect(extension).not.toContain("inject-subagent-context.py");
     expect(extension).not.toContain("session-start.py");
-    // get_context.py is allowed: it lives in .trellis/scripts/ and is the
-    // shared session-overview script invoked by every platform's hook.
+    // Shared Python entrypoints live in .trellis/scripts/, never .pi/hooks/.
+    expect(extension).toContain(
+      'join(root, ".trellis", "scripts", "inject-spec-context.py")',
+    );
 
     const settings = JSON.parse(
       fs.readFileSync(path.join(tmpDir, ".pi", "settings.json"), "utf-8"),
@@ -1442,6 +1449,9 @@ describe("configurePlatform", () => {
     expect(templates?.get(".pi/extensions/trellis/index.ts")).toBe(
       replacePythonCommandLiterals(getPiExtensionTemplate()),
     );
+    expect(
+      templates?.get(".trellis/scripts/inject-spec-context.py"),
+    ).toBeDefined();
     expect(templates?.get(".pi/settings.json")).toBe(
       resolvePlaceholders(getPiSettings().content),
     );

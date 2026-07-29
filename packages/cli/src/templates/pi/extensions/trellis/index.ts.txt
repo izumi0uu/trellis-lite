@@ -18,6 +18,10 @@ interface PiToolResult {
   content: TextContent[];
   details?: unknown;
 }
+interface SpecHookOutput {
+  additionalContext?: string;
+  permissionDecision?: string;
+}
 interface PiExtensionContext {
   hasUI?: boolean;
   sessionManager?: {
@@ -1167,8 +1171,14 @@ function workflowBreadcrumb(root: string, key: string | null): string {
 }
 
 // ── Session Overview ───────────────────────────────────────────────────
-function runContextScript(root: string, key: string | null, args: string[]): string {
-  const script = join(root, ".trellis", "scripts", "get_context.py");
+function runPythonScript(
+  root: string,
+  key: string | null,
+  script: string,
+  args: string[],
+  timeout: number,
+  input?: string,
+): string {
   if (!exists(script)) return "";
   try {
     const py = process.platform === "win32" ? "python" : "python3";
@@ -1176,7 +1186,8 @@ function runContextScript(root: string, key: string | null, args: string[]): str
       cwd: root,
       env: key ? { ...process.env, TRELLIS_CONTEXT_ID: key } : process.env,
       encoding: "utf-8",
-      timeout: SESSION_OVERVIEW_TIMEOUT_MS,
+      input,
+      timeout,
       windowsHide: true,
     });
     if (result.status !== 0) return "";
@@ -1185,6 +1196,65 @@ function runContextScript(root: string, key: string | null, args: string[]): str
   } catch {
     return "";
   }
+}
+
+function runContextScript(root: string, key: string | null, args: string[]): string {
+  return runPythonScript(
+    root,
+    key,
+    join(root, ".trellis", "scripts", "get_context.py"),
+    args,
+    SESSION_OVERVIEW_TIMEOUT_MS,
+  );
+}
+
+function runSpecHook(
+  root: string,
+  key: string,
+  payload: JsonObject,
+): SpecHookOutput | null {
+  const stdout = runPythonScript(
+    root,
+    key,
+    join(root, ".trellis", "scripts", "inject-spec-context.py"),
+    [],
+    15000,
+    JSON.stringify(payload),
+  );
+  if (!stdout) return null;
+  try {
+    const parsed = JSON.parse(stdout) as JsonObject;
+    const output = parsed.hookSpecificOutput;
+    return isObj(output) ? (output as SpecHookOutput) : null;
+  } catch {
+    return null;
+  }
+}
+
+function specToolPayload(
+  root: string,
+  key: string,
+  eventName: "PreToolUse" | "PostToolUse",
+  toolName: string,
+  input: JsonObject,
+): JsonObject | null {
+  const filePath = str(input.path) ?? str(input.file_path) ?? str(input.filePath);
+  const logicalTool =
+    toolName === "read"
+      ? "Read"
+      : toolName === "edit"
+        ? "Edit"
+        : toolName === "write"
+          ? "Write"
+          : null;
+  if (!filePath || !logicalTool) return null;
+  return {
+    hook_event_name: eventName,
+    session_id: key,
+    cwd: root,
+    tool_name: logicalTool,
+    tool_input: { file_path: filePath },
+  };
 }
 
 function sessionOverview(root: string, key: string | null): string {
@@ -1707,6 +1777,7 @@ export default function trellisExtension(pi: {
   const root = findRoot(process.cwd());
   const procKey = `pi_process_${hash([root, process.pid, Date.now(), randomBytes(8).toString("hex")].join(":"))}`;
   let curKey: string | null = null;
+  const pendingSpecContext = new Map<string, string>();
 
   const getKey = (input?: unknown, ctx?: PiExtensionContext) => {
     const k = adoptKey(root, contextKey(input, ctx) ?? curKey ?? procKey);
@@ -1938,10 +2009,15 @@ export default function trellisExtension(pi: {
   pi.on?.("session_shutdown", () => {
     nativeCards.clear();
     activeSubagentToolCallId = null;
+    pendingSpecContext.clear();
   });
   pi.on?.("tool_call", (event, ctx) => {
     const k = getKey(event, ctx);
-    const ev = event as { toolName?: string; input?: JsonObject };
+    const ev = event as {
+      toolName?: string;
+      toolCallId?: string;
+      input?: JsonObject;
+    };
     if (
       ev.toolName === "bash" &&
       isObj(ev.input) &&
@@ -1949,22 +2025,91 @@ export default function trellisExtension(pi: {
       !cmdHasTrellisCtx(ev.input.command)
     )
       ev.input.command = `export TRELLIS_CONTEXT_ID=${shellQuote(k)}; ${ev.input.command}`;
+
+    if (!ev.toolName || !ev.toolCallId || !isObj(ev.input)) return undefined;
+    const specKey = contextKey(event, ctx) ?? k;
+    const payload = specToolPayload(
+      root,
+      specKey,
+      "PreToolUse",
+      ev.toolName,
+      ev.input,
+    );
+    if (!payload || ev.toolName === "read") return undefined;
+    const result = runSpecHook(root, specKey, payload);
+    const context = result?.additionalContext;
+    if (!context) return undefined;
+    if (result.permissionDecision === "deny") {
+      return {
+        block: true,
+        reason:
+          "Trellis loaded governing specs before this tool call. " +
+          "Follow them, then retry the same tool call.\n\n" +
+          context,
+      };
+    }
+    pendingSpecContext.set(ev.toolCallId, context);
+    return undefined;
   });
   // Preserve progress details from execute(); mark failed subagent results through
   // the official tool_result patch hook instead of throwing away renderer details.
-  pi.on?.("tool_result", (event) => {
-    const ev = event as { toolName?: string; details?: unknown };
-    if (
+  pi.on?.("tool_result", (event, ctx) => {
+    const ev = event as {
+      toolName?: string;
+      toolCallId?: string;
+      input?: JsonObject;
+      content?: TextContent[];
+      details?: unknown;
+      isError?: boolean;
+    };
+    const failedSubagent =
       ev.toolName === "trellis_subagent" &&
       isObj(ev.details) &&
       ev.details.kind === "trellis-subagent-progress" &&
       Array.isArray(ev.details.runs) &&
       ev.details.runs.some(
         (r) => isObj(r) && (r.status === "failed" || r.status === "cancelled"),
-      )
-    )
-      return { isError: true };
-    return undefined;
+      );
+
+    let specContext = ev.toolCallId
+      ? pendingSpecContext.get(ev.toolCallId)
+      : undefined;
+    if (ev.toolCallId) pendingSpecContext.delete(ev.toolCallId);
+    if (
+      !specContext &&
+      !ev.isError &&
+      ev.toolName === "read" &&
+      isObj(ev.input)
+    ) {
+      const key = contextKey(event, ctx) ?? getKey(event, ctx);
+      const payload = specToolPayload(
+        root,
+        key,
+        "PostToolUse",
+        ev.toolName,
+        ev.input,
+      );
+      specContext = payload
+        ? runSpecHook(root, key, payload)?.additionalContext
+        : undefined;
+    }
+
+    if (specContext) {
+      return {
+        content: [...(ev.content ?? []), { type: "text", text: specContext }],
+        ...(failedSubagent ? { isError: true } : {}),
+      };
+    }
+    return failedSubagent ? { isError: true } : undefined;
+  });
+  pi.on?.("session_compact", (event, ctx) => {
+    const key = contextKey(event, ctx) ?? getKey(event, ctx);
+    runSpecHook(root, key, {
+      hook_event_name: "SessionStart",
+      session_id: key,
+      source: "compact",
+      cwd: root,
+    });
   });
   pi.on?.("before_agent_start", (event, ctx) => {
     const k = getKey(event, ctx);

@@ -424,6 +424,7 @@ describe("collectPlatformTemplates", () => {
     expect(result?.has(".pi/prompts/trellis-finish-work.md")).toBe(true);
     expect(result?.has(".pi/agents/trellis-implement.md")).toBe(true);
     expect(result?.has(".pi/extensions/trellis/index.ts")).toBe(true);
+    expect(result?.has(".trellis/scripts/inject-spec-context.py")).toBe(true);
     expect(result?.has(".pi/settings.json")).toBe(true);
   });
 

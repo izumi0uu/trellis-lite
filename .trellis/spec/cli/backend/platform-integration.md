@@ -677,6 +677,7 @@ Configurator output:
 .agents/skills/<skill>/SKILL.md
 .pi/agents/trellis-<agent>.md
 .pi/extensions/trellis/index.ts
+.trellis/scripts/inject-spec-context.py
 ```
 
 Runtime script registry:
@@ -688,7 +689,12 @@ _SUBAGENT_CONFIG_DIRS = (..., ".pi", ".zcode")
 
 ### 3. Contracts
 
-Extension-backed platforms MUST NOT receive `.trellis/templates/shared-hooks/*.py` under their config directory. Their hook-equivalent behavior belongs in generated extension source.
+Extension-backed platforms MUST NOT receive
+`.trellis/templates/shared-hooks/*.py` under their config directory. Their
+hook-equivalent behavior belongs in generated extension source. A platform
+extension may invoke a shared runtime entrypoint under `.trellis/scripts/`;
+this does not make `hasPythonHooks` true because the host does not register or
+execute a Python hook itself.
 
 For Pi Agent:
 
@@ -699,6 +705,7 @@ For Pi Agent:
 | Startup context                    | `before_agent_start` builds compact SessionStart-equivalent context (`<session-context>`, adaptive `<first-reply-notice>`, `<session-overview>`, `<trellis-workflow>`, `<ready>`) once per context key, memoizes it, and contributes the identical bytes to `systemPrompt` on every turn |
 | Per-agent-invocation context       | `before_agent_start.systemPrompt` carries a per-context-key snapshot of task context (PRD + jsonl) taken on first use; later on-disk task changes are delivered through `before_agent_start.message` as `<trellis-task-context-update>` persisted messages                               |
 | Per-Bash-tool session identity     | `tool_call` extension event; mutates `event.input.command` in place via `injectTrellisContextIntoBash()` to prefix `export TRELLIS_CONTEXT_ID=<context-key>;`                                                                                                                            |
+| Dynamic spec loading               | `tool_call` runs `.trellis/scripts/inject-spec-context.py` before built-in `write` / `edit`; FULL context blocks once through Pi's model-visible `reason`, while ticket-only context is appended in `tool_result`. Successful `read` calls load context from `tool_result`; `session_compact` records the reset. |
 | Sub-agent dispatch                 | custom `trellis_subagent` tool with `promptSnippet`/`promptGuidelines = SUBAGENT_DISPATCH_PROTOCOL`; resolves the Pi CLI JS entrypoint when possible, runs `--mode text -p --no-session`, sends the delegated prompt through stdin, and forwards `TRELLIS_CONTEXT_ID`                    |
 
 The compact model-visible context injection point is `before_agent_start.message`; it uses `TurnContextCache` so the same request path does not re-spawn the default `get_context.py` session-context call unnecessarily. Pi does not register a Trellis `input` handler for runtime context injection, so user text is not rewritten. The existing Pi `context` event may establish the context key, but it must not append Trellis runtime messages because request-local messages are not persisted and can break provider prefix cache. See "Class-3 injection points (Pi extension)" below the modes table for the runtime contract.
@@ -717,6 +724,7 @@ If `agentCapable` is true, `task.py create` must seed `implement.jsonl` / `check
 | Generated extension source is tracked                                         | `collectTemplates()` must include the same path written by `configure{Platform}`        |
 | Extension path contains `spec/` in a skill name such as `trellis-update-spec` | Template hash exclusion must not drop it; only `.trellis/spec/` is user-owned spec data |
 | Platform uses extension hooks                                                 | Do not copy Python hook files into the platform config dir                              |
+| Extension invokes a shared Python provider                                    | Install and hash-track it under `.trellis/scripts/`; every subprocess/parse failure must fail open |
 
 ### 5. Good / Base / Bad Cases
 

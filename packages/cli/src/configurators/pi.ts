@@ -17,6 +17,17 @@ import {
   getExtensionTemplate,
   getSettingsTemplate,
 } from "../templates/pi/index.js";
+import { getSharedHookScripts } from "../templates/shared-hooks/index.js";
+
+function getSpecInjectionScript(): string {
+  const script = getSharedHookScripts().find(
+    (candidate) => candidate.name === "inject-spec-context.py",
+  );
+  if (!script) {
+    throw new Error("Shared inject-spec-context.py template is missing");
+  }
+  return script.content;
+}
 
 function resolvePiCommands(): ReturnType<typeof resolveCommands> {
   const ctx = AI_TOOLS.pi.templateContext;
@@ -57,6 +68,10 @@ export function collectPiTemplates(): Map<string, string> {
   }
 
   files.set(".pi/extensions/trellis/index.ts", getExtensionTemplate());
+  files.set(
+    ".trellis/scripts/inject-spec-context.py",
+    getSpecInjectionScript(),
+  );
 
   const settings = getSettingsTemplate();
   files.set(
@@ -96,6 +111,11 @@ export async function configurePi(cwd: string): Promise<void> {
   await writeFile(
     path.join(configRoot, "extensions", "trellis", "index.ts"),
     replacePythonCommandLiterals(getExtensionTemplate()),
+  );
+  ensureDir(path.join(cwd, ".trellis", "scripts"));
+  await writeFile(
+    path.join(cwd, ".trellis", "scripts", "inject-spec-context.py"),
+    replacePythonCommandLiterals(getSpecInjectionScript()),
   );
 
   const settings = getSettingsTemplate();

@@ -557,3 +557,37 @@ ticket-only/stateless output proceeds, so state failures cannot loop.
 The same shared hook now treats every `PreToolUse` FULL with persisted records
 as deny-once, not only Codex `apply_patch`. `apply_patch` path extraction stays
 inside the canonical Python parser and covers Add, Update, Delete, and Move.
+
+---
+
+# Pi Agent adapter (2026-07-29)
+
+The Pi extension reuses the same Python provider through a hash-tracked runtime
+entrypoint:
+
+```text
+tool_call(write|edit)
+  -> map input.path to shared PreToolUse payload
+  -> run .trellis/scripts/inject-spec-context.py
+  -> FULL + persisted state: return { block: true, reason: context }
+  -> Pi records a model-visible error tool result
+  -> retry sees silent shared state and executes
+
+tool_result(read)
+  -> map input.path to shared PostToolUse payload
+  -> append emitted context to the successful read result
+
+tool_call mutation with ticket-only output
+  -> remember context by toolCallId
+  -> allow mutation
+  -> append ticket from tool_result
+
+session_compact
+  -> shared SessionStart(source=compact) reset
+```
+
+Pi does not register Python hook files. The extension owns the host event
+surface, while `.trellis/scripts/inject-spec-context.py` remains the common
+matching, budgeting, refresh, identity, and persistence provider. The adapter
+uses Pi's actual session id instead of the task-adoption key so two live Pi
+sessions cannot share delivery state accidentally.

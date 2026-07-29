@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
@@ -131,6 +137,36 @@ function createMinimalTrellisRoot(): string {
   return root;
 }
 
+function installSpecHookFixture(root: string): void {
+  writeFileSync(
+    join(root, ".trellis", "scripts", "inject-spec-context.py"),
+    [
+      "import json",
+      "import sys",
+      "from pathlib import Path",
+      "",
+      "payload = json.load(sys.stdin)",
+      'root = Path(payload["cwd"])',
+      'with (root / "spec-hook-events.jsonl").open("a", encoding="utf-8") as handle:',
+      '    handle.write(json.dumps(payload) + "\\n")',
+      'state = root / "spec-hook-state"',
+      'if payload.get("hook_event_name") == "SessionStart":',
+      "    state.unlink(missing_ok=True)",
+      "    raise SystemExit(0)",
+      'path = payload["tool_input"]["file_path"]',
+      'if path.endswith("ticket.ts"):',
+      '    print(json.dumps({"hookSpecificOutput": {"additionalContext": "<spec-ticket>PI_TICKET</spec-ticket>"}}))',
+      'elif payload.get("hook_event_name") == "PostToolUse":',
+      '    print(json.dumps({"hookSpecificOutput": {"additionalContext": "<spec-context>PI_READ_SPEC</spec-context>"}}))',
+      "elif not state.exists():",
+      '    state.write_text("seen", encoding="utf-8")',
+      '    print(json.dumps({"hookSpecificOutput": {"additionalContext": "<spec-context>PI_WRITE_SPEC</spec-context>", "permissionDecision": "deny"}}))',
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+}
+
 describe("pi templates", () => {
   it("provides the three Trellis sub-agent definitions", () => {
     const agents = getAllAgents();
@@ -222,6 +258,149 @@ describe("pi templates", () => {
     expect(extension).toContain('pi.on?.("tool_call"');
     // tool_result: mark failed/cancelled subagent runs as errors
     expect(extension).toContain('pi.on?.("tool_result"');
+  });
+
+  it("injects governing specs through Pi tool events and resets after compaction", () => {
+    const root = createMinimalTrellisRoot();
+    installSpecHookFixture(root);
+    try {
+      const { trellisExtension } = loadExtensionInternals(root);
+      const handlers = new Map<
+        string,
+        (event: unknown, ctx?: unknown) => unknown
+      >();
+      trellisExtension({
+        registerTool: vi.fn(),
+        registerShortcut: vi.fn(),
+        on(event, handler) {
+          handlers.set(event, handler);
+        },
+      });
+      const ctx = {
+        sessionManager: { getSessionId: () => "pi-spec-session" },
+        ui: { notify: vi.fn() },
+      };
+      const toolCall = handlers.get("tool_call");
+      const toolResult = handlers.get("tool_result");
+      const compact = handlers.get("session_compact");
+
+      const firstWrite = toolCall?.(
+        {
+          type: "tool_call",
+          toolName: "write",
+          toolCallId: "write-1",
+          input: { path: "src/demo.ts", content: "wrong" },
+        },
+        ctx,
+      ) as { block?: boolean; reason?: string } | undefined;
+      expect(firstWrite).toEqual(
+        expect.objectContaining({
+          block: true,
+          reason: expect.stringContaining("PI_WRITE_SPEC"),
+        }),
+      );
+
+      expect(
+        toolCall?.(
+          {
+            type: "tool_call",
+            toolName: "write",
+            toolCallId: "write-2",
+            input: { path: "src/demo.ts", content: "correct" },
+          },
+          ctx,
+        ),
+      ).toBeUndefined();
+
+      expect(
+        toolCall?.(
+          {
+            type: "tool_call",
+            toolName: "edit",
+            toolCallId: "edit-ticket",
+            input: { path: "src/ticket.ts", oldText: "a", newText: "b" },
+          },
+          ctx,
+        ),
+      ).toBeUndefined();
+      expect(
+        toolResult?.(
+          {
+            type: "tool_result",
+            toolName: "edit",
+            toolCallId: "edit-ticket",
+            input: { path: "src/ticket.ts" },
+            content: [{ type: "text", text: "Edited src/ticket.ts" }],
+            details: undefined,
+            isError: false,
+          },
+          ctx,
+        ),
+      ).toEqual({
+        content: [
+          { type: "text", text: "Edited src/ticket.ts" },
+          { type: "text", text: "<spec-ticket>PI_TICKET</spec-ticket>" },
+        ],
+      });
+
+      expect(
+        toolResult?.(
+          {
+            type: "tool_result",
+            toolName: "read",
+            toolCallId: "read-1",
+            input: { path: "src/read.ts" },
+            content: [{ type: "text", text: "file contents" }],
+            details: undefined,
+            isError: false,
+          },
+          ctx,
+        ),
+      ).toEqual({
+        content: [
+          { type: "text", text: "file contents" },
+          { type: "text", text: "<spec-context>PI_READ_SPEC</spec-context>" },
+        ],
+      });
+
+      compact?.({ type: "session_compact" }, ctx);
+      const afterCompact = toolCall?.(
+        {
+          type: "tool_call",
+          toolName: "write",
+          toolCallId: "write-3",
+          input: { path: "src/demo.ts", content: "correct" },
+        },
+        ctx,
+      ) as { block?: boolean; reason?: string } | undefined;
+      expect(afterCompact?.reason).toContain("PI_WRITE_SPEC");
+
+      const events = readFileSync(join(root, "spec-hook-events.jsonl"), "utf-8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(events[0]).toMatchObject({
+        hook_event_name: "PreToolUse",
+        session_id: "pi_pi-spec-session",
+        tool_name: "Write",
+        tool_input: { file_path: "src/demo.ts" },
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          hook_event_name: "PostToolUse",
+          tool_name: "Read",
+          tool_input: { file_path: "src/read.ts" },
+        }),
+      );
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          hook_event_name: "SessionStart",
+          source: "compact",
+        }),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("keeps user input clean while persisting hidden runtime context", () => {
