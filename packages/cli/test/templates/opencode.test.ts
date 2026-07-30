@@ -816,6 +816,43 @@ describe("opencode chat.message subagent skip (issue #264)", () => {
     expect(parts[0].text).toContain("user prompt");
   });
 
+  it("inject-workflow-state.js uses the active task's selected workflow", async () => {
+    const taskDir = join(dir, ".trellis", "tasks", "demo-task");
+    mkdirSync(join(dir, ".trellis", "workflows"), { recursive: true });
+    writeFileSync(
+      join(taskDir, "task.json"),
+      JSON.stringify({
+        id: "demo-task",
+        status: "in_progress",
+        workflow: "tdd",
+      }),
+    );
+    writeFileSync(
+      join(dir, ".trellis", "workflows", "tdd.md"),
+      [
+        "[workflow-state:in_progress]",
+        "OPENCODE_SELECTED_WORKFLOW",
+        "[/workflow-state:in_progress]",
+      ].join("\n"),
+    );
+    writeSessionFile(
+      dir,
+      "opencode_main-session",
+      ".trellis/tasks/demo-task",
+    );
+    const hooks = (await injectWorkflowStatePlugin({
+      directory: dir,
+    })) as ChatMessageHooks;
+    const parts: ChatMessagePart[] = [{ type: "text", text: "user prompt" }];
+
+    await hooks["chat.message"](
+      { sessionID: "main-session", agent: "build" },
+      { parts },
+    );
+
+    expect(parts[0].text).toContain("OPENCODE_SELECTED_WORKFLOW");
+  });
+
   it("inject-workflow-state.js skips injection when the prompt contains the default skip keyword", async () => {
     const hooks = (await injectWorkflowStatePlugin({
       directory: dir,

@@ -153,9 +153,11 @@ def get_active_task(root: Path, input_data: dict) -> Optional[tuple[str, str, st
     if not active.task_path:
         return None
 
-    task_dir = Path(active.task_path)
-    if not task_dir.is_absolute():
-        task_dir = root / task_dir
+    from common.active_task import resolve_task_ref  # type: ignore[import-not-found]
+
+    task_dir = resolve_task_ref(active.task_path, root)
+    if task_dir is None:
+        return None
     if active.stale:
         return task_dir.name, f"stale_{active.source_type}", active.source
 

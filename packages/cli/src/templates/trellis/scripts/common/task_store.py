@@ -259,7 +259,7 @@ def cmd_create(args: argparse.Namespace) -> int:
     # library file only warns — it may be saved later via `trellis workflow --save`)
     workflow_id: str | None = getattr(args, "workflow", None)
     if workflow_id:
-        if not WORKFLOW_ID_RE.match(workflow_id):
+        if not WORKFLOW_ID_RE.fullmatch(workflow_id):
             print(
                 colored(
                     f"Error: invalid workflow id '{workflow_id}' (allowed: letters, digits, '-', '_')",

@@ -43,6 +43,7 @@ from common.active_task import (
     clear_active_task,
     resolve_active_task,
     resolve_context_key,
+    resolve_task_ref,
     set_active_task,
 )
 from common.io import read_json, write_json
@@ -228,7 +229,10 @@ def cmd_workflow(args: argparse.Namespace) -> int:
         print("Hint: run task.py start <dir> first")
         return 1
 
-    task_dir = repo_root / active.task_path
+    task_dir = resolve_task_ref(active.task_path, repo_root)
+    if task_dir is None:
+        print(colored(f"Error: invalid task path: {active.task_path}", Colors.RED))
+        return 1
     task_json_path = task_dir / FILE_TASK_JSON
     if not task_json_path.is_file():
         print(colored(f"Error: task.json not found at {task_dir}", Colors.RED))
@@ -249,7 +253,7 @@ def cmd_workflow(args: argparse.Namespace) -> int:
             print(colored("✓ Workflow selection cleared", Colors.GREEN))
     else:
         workflow_id = args.id
-        if not WORKFLOW_ID_RE.match(workflow_id):
+        if not WORKFLOW_ID_RE.fullmatch(workflow_id):
             print(colored(
                 f"Error: invalid workflow id '{workflow_id}' (allowed: letters, digits, '-', '_')",
                 Colors.RED,
