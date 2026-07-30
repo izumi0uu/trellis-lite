@@ -195,6 +195,59 @@ describe("Codex channel adapter", () => {
     expect(completed.events).toEqual([{ kind: "done", payload: {} }]);
   });
 
+  it("emits an error when a turn fails without a final answer", () => {
+    const result = parse({
+      method: "turn/completed",
+      params: {
+        turn: {
+          status: "failed",
+          error: { message: "Model is not available" },
+        },
+      },
+    });
+
+    expect(result.events).toEqual([
+      {
+        kind: "error",
+        payload: { message: "Model is not available" },
+      },
+    ]);
+  });
+
+  it("does not emit duplicate errors for the same failed turn", () => {
+    const ctx = createCodexCtx();
+    const notification = parse(
+      {
+        method: "error",
+        params: {
+          error: { message: "Request failed with status 400" },
+          willRetry: false,
+        },
+      },
+      ctx,
+    );
+    const completed = parse(
+      {
+        method: "turn/completed",
+        params: {
+          turn: {
+            status: "failed",
+            error: { message: "Request failed with status 400" },
+          },
+        },
+      },
+      ctx,
+    );
+
+    expect(notification.events).toEqual([
+      {
+        kind: "error",
+        payload: { message: "Request failed with status 400" },
+      },
+    ]);
+    expect(completed.events).toEqual([]);
+  });
+
   describe("sandbox override (#413)", () => {
     it("defaults to workspace-write when no sandbox is given", () => {
       const params = buildCodexThreadStartParams("/tmp/proj");
