@@ -2,7 +2,7 @@
   "include": [
     ".trellis/scripts/**/*.py",
     ".claude/hooks/**/*.py",
-    "packages/cli/src/templates/**/*.py",
+    "packages/cli/src/templates/**/*.py"
   ],
   "exclude": ["**/node_modules", "**/__pycache__", "dist"],
   "typeCheckingMode": "standard",
@@ -10,5 +10,5 @@
   "reportMissingImports": true,
   "reportMissingTypeStubs": false,
   "reportUnusedVariable": true,
-  "reportUnusedImport": "warning",
+  "reportUnusedImport": "warning"
 }
