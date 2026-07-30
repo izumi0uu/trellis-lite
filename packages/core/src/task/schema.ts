@@ -102,6 +102,8 @@ const STRING_ARRAY_FIELDS: ReadonlySet<TaskRecordField> = new Set([
   "relatedFiles",
 ]);
 
+const WORKFLOW_ID_RE = /^[A-Za-z0-9_-]+$/;
+
 /**
  * Lightweight runtime schema for {@link TrellisTaskRecord}. Zero-dep on
  * purpose — `taskRecordSchema.parse(input)` returns a canonicalized
@@ -150,6 +152,9 @@ function parseTaskRecord(input: unknown): TrellisTaskRecord {
     const workflow = input.workflow;
     if (typeof workflow !== "string") {
       throw new Error("task.workflow must be a string");
+    }
+    if (!WORKFLOW_ID_RE.test(workflow)) {
+      throw new Error("task.workflow must match [A-Za-z0-9_-]+");
     }
     out.workflow = workflow;
   }

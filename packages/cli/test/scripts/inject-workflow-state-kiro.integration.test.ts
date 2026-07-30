@@ -108,7 +108,7 @@ function runHook(
   tmp: string,
   script: string,
   platformEnvVar: string,
-): { stdout: string; status: number | null } {
+): { stdout: string; stderr: string; status: number | null } {
   const r = spawnSync(
     "python3",
     [path.join(SHARED_HOOKS, script)],
@@ -124,7 +124,7 @@ function runHook(
       env: { ...process.env, [platformEnvVar]: tmp },
     },
   );
-  return { stdout: r.stdout, status: r.status };
+  return { stdout: r.stdout, stderr: r.stderr, status: r.status };
 }
 
 const describeFn = hasPython() ? describe : describe.skip;
@@ -225,5 +225,32 @@ describeFn("Kiro hook output branch", () => {
     expect(task.workflow).toBeUndefined();
 
     expect(runTaskWorkflow(tmp, "tdd\n").status).toBe(1);
+  });
+
+  it("warns once for each explicitly present invalid workflow value", () => {
+    setupSelectedWorkflow(tmp);
+    const taskJson = path.join(
+      tmp,
+      ".trellis",
+      "tasks",
+      "demo-task",
+      "task.json",
+    );
+
+    for (const workflow of ["", null, 42]) {
+      fs.writeFileSync(
+        taskJson,
+        JSON.stringify({ id: "demo-task", status: "in_progress", workflow }),
+      );
+      const result = runHook(
+        tmp,
+        "inject-workflow-state.py",
+        "KIRO_PROJECT_DIR",
+      );
+      const warnings = result.stderr.trim().split(/\r?\n/).filter(Boolean);
+      expect(result.status).toBe(0);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("invalid workflow id");
+    }
   });
 });

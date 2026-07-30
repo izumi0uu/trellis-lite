@@ -29,7 +29,8 @@ covers everything **around** it (parsers, writers, lifecycle, reachability).
 
 ## Marker syntax
 
-Each breadcrumb body lives in a managed block of `.trellis/workflow.md`:
+Each breadcrumb body lives in a managed block of the global workflow or the
+active task's selected variant:
 
 ```
 [workflow-state:STATUS]
@@ -161,8 +162,9 @@ syntax above, `## Phase Index`, `#### X.Y` step headings, platform markers);
 
 ## Source of truth
 
-`workflow.md` is **the only editable source** for breadcrumb body text. The
-hook scripts (`.py` and `.js`) contain only the parser, no fallback text.
+The global workflow or the active task's selected variant is **the only editable
+source** for breadcrumb body text. The hook scripts (`.py` and `.js`) contain
+only the parser, no fallback text.
 
 **Why no fallback dicts**: prior to v0.5.0-beta.20, both hook scripts shipped
 a `_FALLBACK_BREADCRUMBS` / `FALLBACK_BREADCRUMBS` dict mirroring the

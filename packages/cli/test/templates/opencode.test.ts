@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   contextCollector,
   isTrellisSubagent,
@@ -751,6 +751,7 @@ describe("opencode chat.message subagent skip (issue #264)", () => {
     rmSync(dir, { recursive: true, force: true });
     contextCollector.clear("subagent-session");
     contextCollector.clear("main-session");
+    vi.restoreAllMocks();
   });
 
   it("session-start.js early-returns when input.agent is a trellis sub-agent", async () => {
@@ -843,6 +844,7 @@ describe("opencode chat.message subagent skip (issue #264)", () => {
     const hooks = (await injectWorkflowStatePlugin({
       directory: dir,
     })) as ChatMessageHooks;
+    const getActiveTask = vi.spyOn(TrellisContext.prototype, "getActiveTask");
     const parts: ChatMessagePart[] = [{ type: "text", text: "user prompt" }];
 
     await hooks["chat.message"](
@@ -851,6 +853,37 @@ describe("opencode chat.message subagent skip (issue #264)", () => {
     );
 
     expect(parts[0].text).toContain("OPENCODE_SELECTED_WORKFLOW");
+    expect(getActiveTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("inject-workflow-state.js warns once for explicitly invalid workflow values", async () => {
+    const taskDir = join(dir, ".trellis", "tasks", "demo-task");
+    writeSessionFile(
+      dir,
+      "opencode_main-session",
+      ".trellis/tasks/demo-task",
+    );
+    const hooks = (await injectWorkflowStatePlugin({
+      directory: dir,
+    })) as ChatMessageHooks;
+    const error = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    for (const workflow of ["", null, 42]) {
+      writeFileSync(
+        join(taskDir, "task.json"),
+        JSON.stringify({ id: "demo-task", status: "in_progress", workflow }),
+      );
+      const parts: ChatMessagePart[] = [{ type: "text", text: "user prompt" }];
+      await hooks["chat.message"](
+        { sessionID: "main-session", agent: "build" },
+        { parts },
+      );
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(String(error.mock.calls[0]?.[0])).toContain("invalid workflow id");
+      error.mockClear();
+    }
   });
 
   it("inject-workflow-state.js skips injection when the prompt contains the default skip keyword", async () => {

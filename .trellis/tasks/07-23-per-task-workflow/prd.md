@@ -55,7 +55,7 @@ Selection is stored on the task (`task.json`), because:
 6. **No behavior change without opt-in**: absent `workflow` field ⇒ byte-identical
    output to today on every consumer.
 7. **Contract validation**: `--save` warns (never blocks) when the saved variant is
-   missing required parser markers: `## Phase Index`, at least one `#### ` step heading,
+   missing required parser markers: `## Phase Index`, at least one level-4 (`####`) step heading,
    and the six `[workflow-state:*]` blocks.
 8. **Spec updates**: `commands-workflow.md` (new `--save` + library ownership),
    `workflow-state-contract.md` (per-task resolution order).

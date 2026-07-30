@@ -57,11 +57,13 @@ def workflow_md_for_task(repo_root: Path, task_dir: Path | None) -> Path:
         if not isinstance(raw, dict):
             return fallback
 
-        workflow_id = raw.get("workflow")
-        if not isinstance(workflow_id, str) or not workflow_id:
+        if "workflow" not in raw:
             return fallback
 
-        if not WORKFLOW_ID_RE.fullmatch(workflow_id):
+        workflow_id = raw["workflow"]
+        if not isinstance(workflow_id, str) or not WORKFLOW_ID_RE.fullmatch(
+            workflow_id
+        ):
             print(
                 f"Warning: task '{task_dir.name}' has invalid workflow id "
                 f"{workflow_id!r}; using {DIR_WORKFLOW}/workflow.md",

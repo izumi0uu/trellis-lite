@@ -118,6 +118,33 @@ function promptHasSkipKeyword(text, keyword) {
 const WORKFLOW_ID_RE = /^[A-Za-z0-9_-]+$/
 
 /**
+ * Resolve and read active task state once for the current turn.
+ */
+function resolveActiveTaskState(ctx, platformInput = null) {
+  const active = ctx.getActiveTask(platformInput)
+  const taskRef = active.taskPath
+  if (!taskRef) return null
+  const taskDir = ctx.resolveTaskDir(taskRef)
+  if (active.stale || !taskDir || !existsSync(taskDir)) {
+    return { taskRef, source: active.source, stale: true, data: null }
+  }
+  const taskJsonPath = join(taskDir, "task.json")
+  if (!existsSync(taskJsonPath)) {
+    return { taskRef, source: active.source, stale: false, data: null }
+  }
+  try {
+    return {
+      taskRef,
+      source: active.source,
+      stale: false,
+      data: JSON.parse(readFileSync(taskJsonPath, "utf-8")),
+    }
+  } catch {
+    return { taskRef, source: active.source, stale: false, data: null }
+  }
+}
+
+/**
  * Resolve which workflow markdown file feeds this turn's breadcrumbs.
  *
  * Rule (identical across all Trellis consumers):
@@ -130,28 +157,25 @@ const WORKFLOW_ID_RE = /^[A-Za-z0-9_-]+$/
  * - No active task / no "workflow" field / anything unreadable → global
  *   path, silently. Never throws.
  */
-function resolveWorkflowMd(ctx, directory, platformInput) {
+function resolveWorkflowMd(directory, state) {
   const globalPath = join(directory, ".trellis", "workflow.md")
-  let workflowId = ""
-  try {
-    const active = ctx.getActiveTask(platformInput)
-    if (!active.taskPath || active.stale) return globalPath
-    const taskDir = ctx.resolveTaskDir(active.taskPath)
-    if (!taskDir) return globalPath
-    const data = JSON.parse(readFileSync(join(taskDir, "task.json"), "utf-8"))
-    if (data && typeof data.workflow === "string") workflowId = data.workflow
-  } catch {
-    // No active task / unreadable task.json — not a selection, no warning.
+  const data = state?.data
+  if (state?.stale || !data || typeof data !== "object") return globalPath
+  if (!Object.prototype.hasOwnProperty.call(data, "workflow")) return globalPath
+
+  const workflowId = data.workflow
+  if (typeof workflowId !== "string" || !WORKFLOW_ID_RE.test(workflowId)) {
+    console.error(
+      `Warning: active task has invalid workflow id ${JSON.stringify(workflowId)}; using .trellis/workflow.md`,
+    )
     return globalPath
   }
-  if (!workflowId) return globalPath
-  if (WORKFLOW_ID_RE.test(workflowId)) {
-    const variantPath = join(directory, ".trellis", "workflows", `${workflowId}.md`)
-    try {
-      if (statSync(variantPath).isFile()) return variantPath
-    } catch {
-      // ENOENT etc. — treated as a missing variant file; warn below.
-    }
+
+  const variantPath = join(directory, ".trellis", "workflows", `${workflowId}.md`)
+  try {
+    if (statSync(variantPath).isFile()) return variantPath
+  } catch {
+    // ENOENT etc. — treated as a missing variant file; warn below.
   }
   console.error(
     `Warning: active task selects workflow ${JSON.stringify(workflowId)} but .trellis/workflows/ has no matching file; using .trellis/workflow.md`,
@@ -188,25 +212,17 @@ function loadBreadcrumbs(workflowPath) {
 /**
  * Get (taskId, status) from active task, or null if no active task.
  */
-function getActiveTask(ctx, platformInput = null) {
-  const active = ctx.getActiveTask(platformInput)
-  const taskRef = active.taskPath
-  if (!taskRef) return null
-  const taskDir = ctx.resolveTaskDir(taskRef)
-  if (active.stale || !taskDir || !existsSync(taskDir)) {
-    return { id: taskRef.split("/").pop(), status: "stale", source: active.source }
+function getActiveTask(state) {
+  if (!state) return null
+  if (state.stale) {
+    return { id: state.taskRef.split("/").pop(), status: "stale", source: state.source }
   }
-  const taskJsonPath = join(taskDir, "task.json")
-  if (!existsSync(taskJsonPath)) return null
-  try {
-    const data = JSON.parse(readFileSync(taskJsonPath, "utf-8"))
-    const status = typeof data.status === "string" ? data.status : ""
-    if (!status) return null
-    const id = data.id || taskRef.split("/").pop()
-    return { id, status, source: active.source }
-  } catch {
-    return null
-  }
+  const data = state.data
+  if (!data || typeof data !== "object") return null
+  const status = typeof data.status === "string" ? data.status : ""
+  if (!status) return null
+  const id = data.id || state.taskRef.split("/").pop()
+  return { id, status, source: state.source }
 }
 
 /**
@@ -265,8 +281,9 @@ export default async ({ directory }) => {
             return
           }
 
-          const templates = loadBreadcrumbs(resolveWorkflowMd(ctx, directory, input))
-          const task = getActiveTask(ctx, input)
+          const state = resolveActiveTaskState(ctx, input)
+          const templates = loadBreadcrumbs(resolveWorkflowMd(directory, state))
+          const task = getActiveTask(state)
           const breadcrumb = task
             ? buildBreadcrumb(task.id, task.status, templates, task.source)
             : buildBreadcrumb(null, "no_task", templates)

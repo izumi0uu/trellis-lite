@@ -301,7 +301,7 @@ if (explicitTemplate || !isInteractive()) {
 
 Only the no-argument interactive picker may prompt for conflict resolution.
 
-#### Wrong
+#### Wrong: --save
 
 ```typescript
 // Treats a library save like an active-workflow switch.
@@ -312,7 +312,7 @@ removeHash(cwd, PATHS.WORKFLOW_GUIDE_FILE);
 This mutates the hash contract of `.trellis/workflow.md`, a file the `--save`
 path never wrote.
 
-#### Correct
+#### Correct: --save
 
 ```typescript
 fs.writeFileSync(".trellis/workflows/tdd.md", finalContent);

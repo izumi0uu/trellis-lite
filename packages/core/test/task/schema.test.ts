@@ -83,6 +83,14 @@ describe("taskRecordSchema", () => {
         workflow: 42,
       }),
     ).toThrow(/task.workflow must be a string/);
+    for (const workflow of ["", "tdd workflow", "../tdd"]) {
+      expect(() =>
+        taskRecordSchema.parse({
+          ...emptyTaskRecord(),
+          workflow,
+        }),
+      ).toThrow(/task.workflow must match \[A-Za-z0-9_-\]\+/);
+    }
   });
 
   it("rejects non-object inputs", () => {
