@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildCodexThreadStartParams,
   createCodexCtx,
+  encodeCodexUserMessage,
   parseCodexLine,
   parseCodexSandboxMode,
 } from "../../src/commands/channel/adapters/codex.js";
@@ -246,6 +247,33 @@ describe("Codex channel adapter", () => {
       },
     ]);
     expect(completed.events).toEqual([]);
+  });
+
+  it("deduplicates failures in reverse order and resets for the next turn", () => {
+    const ctx = createCodexCtx();
+    const completed = {
+      method: "turn/completed",
+      params: {
+        turn: {
+          status: "failed",
+          error: { message: "Request failed with status 400" },
+        },
+      },
+    };
+    const notification = {
+      method: "error",
+      params: {
+        error: { message: "Request failed with status 400" },
+        willRetry: false,
+      },
+    };
+
+    expect(parse(completed, ctx).events).toHaveLength(1);
+    expect(parse(notification, ctx).events).toEqual([]);
+
+    ctx.threadId = "thread-1";
+    encodeCodexUserMessage(ctx, "try again");
+    expect(parse(notification, ctx).events).toHaveLength(1);
   });
 
   describe("sandbox override (#413)", () => {
