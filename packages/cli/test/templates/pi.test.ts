@@ -47,6 +47,10 @@ interface PiExtensionInternals {
   isTrellisAgent: (root: string, agent: string) => boolean;
   parseAgentFM: (content: string) => AgentConfig;
   buildPiArgs: (config: PiRunConfig) => string[];
+  splitModelThinking: (
+    model?: string,
+    fallbackThinking?: string,
+  ) => { model?: string; thinking?: string };
   resolveRunCfg: (
     input: { model?: string; thinking?: string },
     agentCfg: AgentConfig,
@@ -87,6 +91,7 @@ export {
   isTrellisAgent,
   parseAgentFM,
   buildPiArgs,
+  splitModelThinking,
   resolveRunCfg,
   contextModelRef,
   cmdHasTrellisCtx,
@@ -220,7 +225,7 @@ describe("pi templates", () => {
       'enum: ["single", "parallel", "chain"]',
     );
     expect(extension).toContain(
-      'enum: ["off", "minimal", "low", "medium", "high", "xhigh"]',
+      'enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"]',
     );
 
     // Dispatch protocol carries the "Active task: <path>" prefix rule.
@@ -550,6 +555,34 @@ fallbackModels:
       "--tools",
       "Read,Write,Bash,find,Grep",
     ]);
+  });
+
+  it("supports max thinking for GPT-5.6 subagents (#470)", () => {
+    const { buildPiArgs, resolveRunCfg, splitModelThinking } =
+      loadExtensionInternals();
+    const agentCfg: AgentConfig = {
+      model: "openai/gpt-5.6-sol",
+      thinking: "max",
+      fallbackModels: [],
+    };
+
+    const config = resolveRunCfg({}, agentCfg);
+    expect(config).toEqual({
+      model: "openai/gpt-5.6-sol:max",
+      thinking: "max",
+    });
+    expect(buildPiArgs(config)).toEqual([
+      "--mode",
+      "json",
+      "-p",
+      "--no-session",
+      "--model",
+      "openai/gpt-5.6-sol:max",
+    ]);
+    expect(splitModelThinking(config.model)).toEqual({
+      model: "openai/gpt-5.6-sol",
+      thinking: "max",
+    });
   });
 
   it("inherits the invoking Pi model after per-call and agent defaults", () => {
