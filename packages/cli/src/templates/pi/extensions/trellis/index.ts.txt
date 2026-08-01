@@ -1035,8 +1035,11 @@ function contextKey(input?: unknown, ctx?: PiExtensionContext): string | null {
     str(process.env.PI_SESSION_ID) ??
     str(process.env.PI_SESSIONID) ??
     lookupStr(input, ["session_id", "sessionId", "sessionID"]);
-  if (sessionId)
-    return `pi_${sessionId.replace(/[^A-Za-z0-9._-]+/g, "_") || hash(sessionId)}`;
+  if (sessionId) {
+    const normalized = sessionId.replace(/[^A-Za-z0-9._-]+/g, "_");
+    if (!normalized) return `pi_${hash(sessionId)}`;
+    return `pi_${normalized}${normalized === sessionId ? "" : `_${hash(sessionId)}`}`;
+  }
   const transcriptPath =
     callStr(ctx?.sessionManager?.getSessionFile, ctx?.sessionManager) ??
     lookupStr(input, ["transcript_path", "transcriptPath", "transcript"]);

@@ -504,6 +504,33 @@ describe("pi templates", () => {
         "export TRELLIS_CONTEXT_ID='pi_native-window-b'; printf safe",
       );
 
+      const collisionKeys = ["native/window", "native:window"].map(
+        (sessionId) => {
+          const collisionHandlers = new Map<
+            string,
+            (event: unknown, ctx?: unknown) => unknown
+          >();
+          loadExtensionInternals(root).trellisExtension({
+            on(event, handler) {
+              collisionHandlers.set(event, handler);
+            },
+          });
+          const event = {
+            toolName: "bash",
+            input: { command: "printf collision" },
+          };
+          collisionHandlers.get("tool_call")?.(event, {
+            sessionManager: { getSessionId: () => sessionId },
+          });
+          return event.input.command.match(
+            /^export TRELLIS_CONTEXT_ID='([^']+)'/,
+          )?.[1];
+        },
+      );
+      expect(collisionKeys[0]).toMatch(/^pi_native_window_[a-f0-9]{24}$/);
+      expect(collisionKeys[1]).toMatch(/^pi_native_window_[a-f0-9]{24}$/);
+      expect(collisionKeys[0]).not.toBe(collisionKeys[1]);
+
       const beforeAgentStart = handlers.get("before_agent_start")?.(
         { type: "before_agent_start", systemPrompt: "BASE" },
         ctx,
