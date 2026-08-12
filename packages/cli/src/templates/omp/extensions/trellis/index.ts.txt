@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync, readSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync, readSync } from "node:fs";
 import { join, dirname, basename, isAbsolute, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -413,56 +413,119 @@ function readContextInjectionLimits(projectRoot: string): ContextInjectionLimits
 }
 
 class ContextBudget {
-   used = 0;
-   constructor(private readonly maxTotalBytes: number) {}
+   used: number;
+   private terminalSummaryEmitted = false;
+   private stopped = false;
+   constructor(private readonly maxTotalBytes: number, initialUsed = 0) {
+      this.used = initialUsed;
+   }
 
    hasRoom(bytes: number): boolean {
-      return this.maxTotalBytes <= 0 || this.used + bytes <= this.maxTotalBytes;
+      return !this.stopped && (this.maxTotalBytes <= 0 || this.used + bytes <= this.maxTotalBytes);
    }
 
-   add(bytes: number): void {
+   emit(text: string): string {
+      const bytes = Buffer.byteLength(text, "utf-8");
+      if (!this.hasRoom(bytes)) return "";
       this.used += bytes;
+      return text;
    }
+
+   emitCandidate(primary: string, fallback: string | null): string {
+      const direct = this.emit(primary);
+      if (direct) return direct;
+      if (fallback !== null) {
+         const notice = this.emit(fallback);
+         if (notice) return notice;
+      }
+      return this.emitTerminalSummary();
+   }
+
+   private emitTerminalSummary(): string {
+      if (this.terminalSummaryEmitted) return "";
+      this.terminalSummaryEmitted = true;
+      this.stopped = true;
+      const summary = "[Trellis: context limit reached; omitted entries remain authoritative on disk and require_read paths above.]";
+      if (this.maxTotalBytes <= 0) {
+         this.used += Buffer.byteLength(summary, "utf-8");
+         return summary;
+      }
+      const remaining = this.maxTotalBytes - this.used;
+      if (remaining <= 0) return "";
+      const bounded = truncateUtf8(Buffer.from(summary, "utf-8"), remaining).toString("utf-8");
+      this.used += Buffer.byteLength(bounded, "utf-8");
+      return bounded;
+   }
+}
+
+type Utf8Status = "valid" | "incomplete" | "invalid";
+
+function utf8Status(data: Buffer): Utf8Status {
+   for (let index = 0; index < data.length; index++) {
+      const lead = data[index]!;
+      if (lead <= 0x7f) continue;
+
+      let length: number;
+      let secondMin = 0x80;
+      let secondMax = 0xbf;
+      if (lead >= 0xc2 && lead <= 0xdf) length = 2;
+      else if (lead >= 0xe0 && lead <= 0xef) {
+         length = 3;
+         if (lead === 0xe0) secondMin = 0xa0;
+         if (lead === 0xed) secondMax = 0x9f;
+      } else if (lead >= 0xf0 && lead <= 0xf4) {
+         length = 4;
+         if (lead === 0xf0) secondMin = 0x90;
+         if (lead === 0xf4) secondMax = 0x8f;
+      } else return "invalid";
+
+      if (index + length > data.length) {
+         for (let tail = index + 1; tail < data.length; tail++) {
+            if (data[tail]! < 0x80 || data[tail]! > 0xbf) return "invalid";
+         }
+         return "incomplete";
+      }
+      const second = data[index + 1]!;
+      if (second < secondMin || second > secondMax) return "invalid";
+      for (let continuation = index + 2; continuation < index + length; continuation++) {
+         const byte = data[continuation]!;
+         if (byte < 0x80 || byte > 0xbf) return "invalid";
+      }
+      index += length - 1;
+   }
+   return "valid";
 }
 
 function truncateUtf8(data: Buffer, cap: number): Buffer {
    if (cap <= 0 || data.length <= cap) return data;
-   let end = cap;
-   while (end > 0 && (data[end - 1]! & 0xc0) === 0x80) end--;
-   if (end === 0) return Buffer.alloc(0);
-   const lead = data[end - 1]!;
-   if (lead & 0x80) {
-      let sequenceLength = 1;
-      if ((lead & 0xe0) === 0xc0) sequenceLength = 2;
-      else if ((lead & 0xf0) === 0xe0) sequenceLength = 3;
-      else if ((lead & 0xf8) === 0xf0) sequenceLength = 4;
-      if (end - 1 + sequenceLength > cap) end--;
+   if (utf8Status(data.subarray(0, cap)) === "valid") return data.subarray(0, cap);
+   // A bounded read has already been validated as a complete UTF-8 stream.
+   // Only its final, incomplete code point may make the cap prefix invalid.
+   for (let end = cap - 1; end >= Math.max(0, cap - 4); end--) {
+      const candidate = data.subarray(0, end);
+      if (utf8Status(candidate) === "valid") return candidate;
    }
-   return data.subarray(0, end);
+   return Buffer.alloc(0);
 }
 
 function isUtf8(data: Buffer): boolean {
-   try {
-      const decoded = data.toString("utf-8");
-      return Buffer.from(decoded, "utf-8").equals(data);
-   } catch {
-      return false;
-   }
+   return utf8Status(data) === "valid";
 }
 
 function readFilePrefix(filePath: string, maxBytes: number): { data: Buffer; size: number } | null {
    let fd: number | null = null;
    try {
-      const size = statSync(filePath).size;
-      if (maxBytes <= 0 || size <= maxBytes) {
-         return { data: readFileSync(filePath), size };
-      }
       fd = openSync(filePath, "r");
+      if (maxBytes <= 0) {
+         const data = readFileSync(fd);
+         return { data, size: fstatSync(fd).size };
+      }
       // Read a few extra bytes so a UTF-8 sequence crossing the cap can be
-      // validated before truncateUtf8 removes its incomplete suffix.
+      // validated before truncateUtf8 removes its incomplete suffix. The
+      // descriptor keeps the read bounded if the path is replaced or grows.
       const data = Buffer.allocUnsafe(maxBytes + 4);
       const bytesRead = readSync(fd, data, 0, data.length, 0);
-      return { data: data.subarray(0, bytesRead), size };
+      return { data: data.subarray(0, bytesRead), size: fstatSync(fd).size };
    } catch {
       return null;
    } finally {
@@ -475,22 +538,9 @@ function omittedNotice(file: string, size: number | null, reason: string): strin
    return `### ${file} [omitted]\n\n[Trellis: omitted (${reason}) — ${file} (${sizeText}); required_read: ${file}]`;
 }
 
-function budgetedBlock(
-   budget: ContextBudget,
-   file: string,
-   content: string,
-   status: "inline" | "truncated",
-   size: number,
-   reason: string,
-): string {
-   const block = `### ${file} [${status}]\n\n${content}`;
-   if (budget.hasRoom(Buffer.byteLength(block, "utf-8"))) {
-      budget.add(Buffer.byteLength(block, "utf-8"));
-      return block;
-   }
-   const notice = omittedNotice(file, size, `total context limit reached: ${reason}`);
-   budget.add(Buffer.byteLength(notice, "utf-8"));
-   return notice;
+interface MaterializedFile {
+   block: string | null;
+   notice: string;
 }
 
 function materializeFile(
@@ -498,26 +548,27 @@ function materializeFile(
    displayPath: string,
    reason: string,
    limits: ContextInjectionLimits,
-   budget: ContextBudget,
-): string {
+): MaterializedFile {
    const file = readFilePrefix(targetPath, limits.max_file_bytes);
    if (!file) {
-      return omittedNotice(displayPath, null, "file is missing or unreadable");
+      return { block: null, notice: omittedNotice(displayPath, null, "file is missing or unreadable") };
    }
    const { data, size } = file;
-   const truncated = truncateUtf8(data, limits.max_file_bytes);
-   if (truncated.includes(0) || !isUtf8(truncated)) {
-      const notice = omittedNotice(displayPath, size, `binary or non-UTF-8 file: ${reason}`);
-      budget.add(Buffer.byteLength(notice, "utf-8"));
-      return notice;
+   const encodingStatus = utf8Status(data);
+   if (data.includes(0) || encodingStatus === "invalid" || (encodingStatus === "incomplete" && size <= data.length)) {
+      return { block: null, notice: omittedNotice(displayPath, size, `binary or non-UTF-8 file: ${reason}`) };
    }
+   const truncated = truncateUtf8(data, limits.max_file_bytes);
    let content = truncated.toString("utf-8");
    let status: "inline" | "truncated" = "inline";
    if (truncated.length < size) {
       status = "truncated";
       content += `\n[Trellis: truncated at ${limits.max_file_bytes} bytes — read ${displayPath} for the full content]`;
    }
-   return budgetedBlock(budget, displayPath, content, status, size, reason);
+   return {
+      block: `### ${displayPath} [${status}]\n\n${content}`,
+      notice: omittedNotice(displayPath, size, `total context limit reached: ${reason}`),
+   };
 }
 
 function materializeArtifact(
@@ -525,45 +576,51 @@ function materializeArtifact(
    displayPath: string,
    reason: string,
    limits: ContextInjectionLimits,
-   budget: ContextBudget,
-): string {
+): MaterializedFile {
    const file = readFilePrefix(targetPath, limits.max_artifact_bytes);
    if (!file) {
-      return omittedNotice(displayPath, null, "artifact is missing or unreadable");
+      return { block: null, notice: omittedNotice(displayPath, null, "artifact is missing or unreadable") };
    }
    const { data, size } = file;
-   const truncated = truncateUtf8(data, limits.max_artifact_bytes);
-   if (truncated.includes(0) || !isUtf8(truncated)) {
-      const notice = omittedNotice(displayPath, size, `binary or non-UTF-8 artifact: ${reason}`);
-      budget.add(Buffer.byteLength(notice, "utf-8"));
-      return notice;
+   const encodingStatus = utf8Status(data);
+   if (data.includes(0) || encodingStatus === "invalid" || (encodingStatus === "incomplete" && size <= data.length)) {
+      return { block: null, notice: omittedNotice(displayPath, size, `binary or non-UTF-8 artifact: ${reason}`) };
    }
+   const truncated = truncateUtf8(data, limits.max_artifact_bytes);
    let content = truncated.toString("utf-8");
    let status: "inline" | "truncated" = "inline";
    if (truncated.length < size) {
       status = "truncated";
       content += `\n[Trellis: truncated at ${limits.max_artifact_bytes} bytes — read ${displayPath} for the full content]`;
    }
-   return budgetedBlock(budget, displayPath, content, status, size, reason);
+   return {
+      block: `### ${displayPath} [${status}]\n\n${content}`,
+      notice: omittedNotice(displayPath, size, `total context limit reached: ${reason}`),
+   };
 }
 
 function readJsonlLines(jsonlPath: string, displayPath: string): { lines: string[]; omitted: string | null } {
-   let size: number;
+   let fd: number | null = null;
    try {
-      size = statSync(jsonlPath).size;
+      fd = openSync(jsonlPath, "r");
+      const data = Buffer.allocUnsafe(MAX_JSONL_BYTES + 1);
+      const bytesRead = readSync(fd, data, 0, data.length, 0);
+      const size = fstatSync(fd).size;
+      if (bytesRead > MAX_JSONL_BYTES || size > MAX_JSONL_BYTES) {
+         return {
+            lines: [],
+            omitted: omittedNotice(displayPath, size, `manifest exceeds ${MAX_JSONL_BYTES} byte parse limit`),
+         };
+      }
+      const content = data.subarray(0, bytesRead);
+      if (!isUtf8(content)) {
+         return { lines: [], omitted: omittedNotice(displayPath, size, "manifest is not valid UTF-8") };
+      }
+      return { lines: content.toString("utf-8").split(/\r?\n/), omitted: null };
    } catch {
-      return { lines: [], omitted: null };
-   }
-   if (size > MAX_JSONL_BYTES) {
-      return {
-         lines: [],
-         omitted: omittedNotice(displayPath, size, `manifest exceeds ${MAX_JSONL_BYTES} byte parse limit`),
-      };
-   }
-   try {
-      return { lines: readFileSync(jsonlPath, "utf-8").split(/\r?\n/), omitted: null };
-   } catch {
-      return { lines: [], omitted: omittedNotice(displayPath, size, "manifest is missing or unreadable") };
+      return { lines: [], omitted: omittedNotice(displayPath, null, "manifest is missing or unreadable") };
+   } finally {
+      if (fd !== null) closeSync(fd);
    }
 }
 
@@ -573,15 +630,34 @@ function buildTaskContext(projectRoot: string, taskDir: string, agentType?: Agen
    // config.yaml for every jsonl row.
    const trustedRoots = resolveTrustedRoots(projectRoot);
    const limits = readContextInjectionLimits(projectRoot);
-   const budget = new ContextBudget(limits.max_total_bytes);
+   const prefix = "<task-context>\nContext is bounded by .trellis/config.yaml. Files marked [truncated] or [omitted] remain authoritative on disk; use their required_read path before relying on missing detail.\n\n";
+   const suffix = "\n</task-context>";
+   const wrapperBytes = Buffer.byteLength(prefix + suffix, "utf-8");
+   const budget = new ContextBudget(limits.max_total_bytes, wrapperBytes);
+
+   const emit = (text: string, fallback: string | null = null): string => budget.emitCandidate(text, fallback);
+   const appendCandidate = (primary: string, fallback: string | null = null): void => {
+      const separator = parts.length > 0 ? "\n\n" : "";
+      const output = emit(
+         primary ? separator + primary : "",
+         fallback === null ? null : separator + fallback,
+      );
+      if (output) parts.push(output);
+   };
 
    // prd.md and info.md — always included
    const prdPath = join(taskDir, "prd.md");
    const relativePrdPath = displayProjectPath(projectRoot, prdPath, taskDir);
-   if (existsSync(prdPath)) parts.push(materializeArtifact(prdPath, relativePrdPath, "Requirements document", limits, budget));
+   if (existsSync(prdPath)) {
+      const artifact = materializeArtifact(prdPath, relativePrdPath, "Requirements document", limits);
+      appendCandidate(artifact.block ?? "", artifact.notice);
+   }
    const infoPath = join(taskDir, "info.md");
    const relativeInfoPath = displayProjectPath(projectRoot, infoPath, taskDir);
-   if (existsSync(infoPath)) parts.push(materializeArtifact(infoPath, relativeInfoPath, "Task information", limits, budget));
+   if (existsSync(infoPath)) {
+      const artifact = materializeArtifact(infoPath, relativeInfoPath, "Task information", limits);
+      appendCandidate(artifact.block ?? "", artifact.notice);
+   }
 
    // Determine which jsonl files to read based on agent type
    const jsonlNames = taskContextJsonlNames(agentType);
@@ -597,11 +673,12 @@ function buildTaskContext(projectRoot: string, taskDir: string, agentType?: Agen
       const relativeJsonlPath = displayProjectPath(projectRoot, jsonlPath, taskDir);
       const manifest = readJsonlLines(jsonlPath, relativeJsonlPath);
       if (manifest.omitted) {
-         parts.push(`## ${jsonlName}\n\n${manifest.omitted}`);
+         appendCandidate(`## ${jsonlName}\n\n${manifest.omitted}`);
          continue;
       }
 
       const fileChunks: string[] = [];
+      let sectionHeaderEmitted = false;
       for (const line of manifest.lines) {
          const trimmed = line.trim();
          if (!trimmed) continue;
@@ -613,20 +690,31 @@ function buildTaskContext(projectRoot: string, taskDir: string, agentType?: Agen
             if (!targetPath) continue;
             if (includedPaths.has(targetPath)) continue;
             includedPaths.add(targetPath);
-            fileChunks.push(materializeFile(targetPath, file, typeof row.reason === "string" ? row.reason : "-", limits, budget));
+            const materialized = materializeFile(targetPath, file, typeof row.reason === "string" ? row.reason : "-", limits);
+            const sectionPrefix = sectionHeaderEmitted
+               ? "\n\n---\n\n"
+               : `${parts.length > 0 ? "\n\n" : ""}## ${jsonlName}\n\n`;
+            const output = emit(
+               materialized.block ? `${sectionPrefix}${materialized.block}` : "",
+               `${sectionPrefix}${materialized.notice}`,
+            );
+            if (output) {
+               fileChunks.push(output);
+               sectionHeaderEmitted = true;
+            }
          } catch {
             // seed rows and malformed lines are non-fatal
          }
       }
 
-      if (fileChunks.length > 0) {
-         parts.push(`## ${jsonlName}\n\n${fileChunks.join("\n\n---\n\n")}`);
-      }
+      if (fileChunks.length > 0) parts.push(fileChunks.join(""));
    }
 
-   return parts.length > 0
-      ? `<task-context>\nContext is bounded by .trellis/config.yaml. Files marked [truncated] or [omitted] remain authoritative on disk; use their required_read path before relying on missing detail.\n\n${parts.join("\n\n")}\n</task-context>`
-      : "";
+   if (parts.length === 0) return "";
+   const context = `${prefix}${parts.join("")}${suffix}`;
+   return limits.max_total_bytes > 0 && Buffer.byteLength(context, "utf-8") > limits.max_total_bytes
+      ? truncateUtf8(Buffer.from(context, "utf-8"), limits.max_total_bytes).toString("utf-8")
+      : context;
 }
 
 // ---------------------------------------------------------------------------

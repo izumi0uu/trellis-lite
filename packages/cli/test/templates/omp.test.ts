@@ -421,6 +421,96 @@ describe("omp templates", () => {
     }
   });
 
+  it("omits a file when an invalid UTF-8 byte is exactly at the file limit", async () => {
+    const project = makeOmpProject();
+    try {
+      fs.writeFileSync(
+        path.join(project.root, ".trellis", "config.yaml"),
+        "context_injection:\n  max_file_bytes: 3\n  max_artifact_bytes: 64\n  max_total_bytes: 2000\n",
+      );
+      fs.writeFileSync(path.join(project.root, "invalid.md"), Buffer.from([0x61, 0x62, 0x63, 0x80, 0x64]));
+      fs.writeFileSync(
+        path.join(project.taskDir, "implement.jsonl"),
+        JSON.stringify({ file: "invalid.md", reason: "invalid boundary" }) + "\n",
+      );
+
+      const context = await runSessionStart(project.root, project.sessionId);
+      expect(context).toContain("invalid.md [omitted]");
+      expect(context).toContain("binary or non-UTF-8 file");
+      expect(context).not.toContain("invalid.md [truncated]");
+    } finally {
+      fs.rmSync(project.root, { recursive: true, force: true });
+    }
+  });
+
+  it("truncates a valid multibyte character that crosses the file limit", async () => {
+    const project = makeOmpProject();
+    try {
+      fs.writeFileSync(
+        path.join(project.root, ".trellis", "config.yaml"),
+        "context_injection:\n  max_file_bytes: 3\n  max_artifact_bytes: 64\n  max_total_bytes: 2000\n",
+      );
+      fs.writeFileSync(path.join(project.root, "unicode.md"), "a€tail");
+      fs.writeFileSync(
+        path.join(project.taskDir, "implement.jsonl"),
+        JSON.stringify({ file: "unicode.md", reason: "unicode boundary" }) + "\n",
+      );
+
+      const context = await runSessionStart(project.root, project.sessionId);
+      expect(context).toContain("unicode.md [truncated]");
+      expect(context).toContain("a");
+      expect(context).not.toContain("unicode.md [omitted]");
+    } finally {
+      fs.rmSync(project.root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a valid multibyte character when it ends at the file limit", async () => {
+    const project = makeOmpProject();
+    try {
+      fs.writeFileSync(
+        path.join(project.root, ".trellis", "config.yaml"),
+        "context_injection:\n  max_file_bytes: 4\n  max_artifact_bytes: 64\n  max_total_bytes: 2000\n",
+      );
+      fs.writeFileSync(path.join(project.root, "unicode-end.md"), "a€tail");
+      fs.writeFileSync(
+        path.join(project.taskDir, "implement.jsonl"),
+        JSON.stringify({ file: "unicode-end.md", reason: "unicode end boundary" }) + "\n",
+      );
+
+      const context = await runSessionStart(project.root, project.sessionId);
+      expect(context).toContain("unicode-end.md [truncated]");
+      expect(context).toContain("a€");
+      expect(context).not.toContain("unicode-end.md [omitted]");
+    } finally {
+      fs.rmSync(project.root, { recursive: true, force: true });
+    }
+  });
+
+  it("never exceeds the total context byte limit with repeated omitted entries", async () => {
+    const project = makeOmpProject();
+    const maxTotalBytes = 700;
+    try {
+      fs.writeFileSync(
+        path.join(project.root, ".trellis", "config.yaml"),
+        `context_injection:\n  max_file_bytes: 0\n  max_artifact_bytes: 64\n  max_total_bytes: ${maxTotalBytes}\n`,
+      );
+      const rows: string[] = [];
+      for (let index = 0; index < 20; index++) {
+        const file = `oversized-${index}.md`;
+        fs.writeFileSync(path.join(project.root, file), "x".repeat(2000));
+        rows.push(JSON.stringify({ file, reason: "budget regression" }));
+      }
+      fs.writeFileSync(path.join(project.taskDir, "implement.jsonl"), `${rows.join("\n")}\n`);
+
+      const context = await runSessionStart(project.root, project.sessionId);
+      expect(Buffer.byteLength(context, "utf-8")).toBeLessThanOrEqual(maxTotalBytes);
+      expect(context.match(/\[omitted\]/g)?.length ?? 0).toBeLessThan(20);
+    } finally {
+      fs.rmSync(project.root, { recursive: true, force: true });
+    }
+  });
+
   it("no settings.json or Python hooks exist in the template directory", () => {
     // OMP is extension-backed: native provider auto-discovers .omp/ subdirs,
     // so no settings.json is needed and no Python hooks should be present.
