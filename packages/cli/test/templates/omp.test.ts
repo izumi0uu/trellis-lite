@@ -299,7 +299,7 @@ describe("omp templates", () => {
       expect(initial?.content).toContain("old context body");
       expect(initial?.content).not.toContain("created later body");
 
-      fs.writeFileSync(referencedFile, "new context body");
+      fs.writeFileSync(referencedFile, "new context body with changed size");
       fs.writeFileSync(path.join(projectRoot, "docs", "created-later.md"), "created later body");
       const result = await context(
         {
@@ -315,7 +315,7 @@ describe("omp templates", () => {
         (message) => message.customType === "trellis-task-context",
       ) ?? [];
       expect(refreshed).toHaveLength(1);
-      expect(refreshed[0]?.content).toContain("new context body");
+      expect(refreshed[0]?.content).toContain("new context body with changed size");
       expect(refreshed[0]?.content).toContain("created later body");
       expect(refreshed[0]?.content).not.toContain("old context body");
 
