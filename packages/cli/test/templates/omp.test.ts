@@ -443,6 +443,32 @@ describe("omp templates", () => {
     }
   });
 
+  it("omits invalid UTF-8 second-byte boundary pairs", async () => {
+    for (const [name, bytes] of [
+      ["invalid-e0.md", [0x61, 0xe0, 0x80, 0x62]],
+      ["invalid-ed.md", [0x61, 0xed, 0xa0, 0x80, 0x62]],
+    ] as const) {
+      const project = makeOmpProject();
+      try {
+        fs.writeFileSync(
+          path.join(project.root, ".trellis", "config.yaml"),
+          "context_injection:\n  max_file_bytes: 3\n  max_artifact_bytes: 64\n  max_total_bytes: 2000\n",
+        );
+        fs.writeFileSync(path.join(project.root, name), Buffer.from(bytes));
+        fs.writeFileSync(
+          path.join(project.taskDir, "implement.jsonl"),
+          JSON.stringify({ file: name, reason: "invalid second-byte boundary" }) + "\n",
+        );
+
+        const context = await runSessionStart(project.root, project.sessionId);
+        expect(context).toContain(`${name} [omitted]`);
+        expect(context).not.toContain(`${name} [truncated]`);
+      } finally {
+        fs.rmSync(project.root, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("truncates a valid multibyte character that crosses the file limit", async () => {
     const project = makeOmpProject();
     try {
@@ -458,7 +484,8 @@ describe("omp templates", () => {
 
       const context = await runSessionStart(project.root, project.sessionId);
       expect(context).toContain("unicode.md [truncated]");
-      expect(context).toContain("a");
+      expect(context).toContain("### unicode.md [truncated]\n\na\n[Trellis: truncated at 3 bytes");
+      expect(context).not.toContain("€");
       expect(context).not.toContain("unicode.md [omitted]");
     } finally {
       fs.rmSync(project.root, { recursive: true, force: true });
@@ -505,7 +532,11 @@ describe("omp templates", () => {
 
       const context = await runSessionStart(project.root, project.sessionId);
       expect(Buffer.byteLength(context, "utf-8")).toBeLessThanOrEqual(maxTotalBytes);
-      expect(context.match(/\[omitted\]/g)?.length ?? 0).toBeLessThan(20);
+      const omittedCount = context.match(/\[omitted\]/g)?.length ?? 0;
+      expect(omittedCount).toBeGreaterThan(0);
+      expect(omittedCount).toBeLessThan(20);
+      expect(context).toContain("context limit reached");
+      expect(context).toMatch(/<\/task-context>$/);
     } finally {
       fs.rmSync(project.root, { recursive: true, force: true });
     }
