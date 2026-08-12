@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { join, dirname, isAbsolute, relative, resolve } from "node:path";
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync, readSync } from "node:fs";
+import { join, dirname, basename, isAbsolute, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
@@ -175,6 +175,26 @@ function resolveProjectFile(
    }
 }
 
+function displayProjectPath(projectRoot: string, filePath: string, taskDir?: string): string {
+   const direct = relative(projectRoot, filePath).split("\\").join("/");
+   if (direct && !direct.startsWith("../") && !isAbsolute(direct)) return direct;
+   if (taskDir) {
+      const taskRelative = relative(projectRoot, taskDir).split("\\").join("/");
+      const taskLabel = taskRelative && !taskRelative.startsWith("../") && !isAbsolute(taskRelative)
+         ? taskRelative
+         : `.trellis/tasks/${basename(taskDir)}`;
+      const withinTask = relative(taskDir, filePath).split("\\").join("/");
+      if (withinTask && !withinTask.startsWith("../") && !isAbsolute(withinTask)) {
+         return `${taskLabel}/${withinTask}`;
+      }
+   }
+   try {
+      return relative(realpathSync(projectRoot), realpathSync(filePath)).split("\\").join("/");
+   } catch {
+      return relative(projectRoot, filePath).split("\\").join("/");
+   }
+}
+
 // ---------------------------------------------------------------------------
 // Active task resolution
 // ---------------------------------------------------------------------------
@@ -325,20 +345,243 @@ function taskContextSignature(projectRoot: string, taskDir: string, agentType?: 
    }).join("\n");
 }
 
+interface ContextInjectionLimits {
+   max_file_bytes: number;
+   max_artifact_bytes: number;
+   max_total_bytes: number;
+}
+
+const DEFAULT_CONTEXT_INJECTION_LIMITS: ContextInjectionLimits = {
+   max_file_bytes: 32768,
+   max_artifact_bytes: 65536,
+   max_total_bytes: 131072,
+};
+const MAX_JSONL_BYTES = 1024 * 1024;
+
+function stripInlineComment(value: string): string {
+   let quote: string | null = null;
+   for (let i = 0; i < value.length; i++) {
+      const char = value[i];
+      if (quote) {
+         if (char === quote) quote = null;
+         continue;
+      }
+      if (char === "'" || char === '"') {
+         quote = char;
+         continue;
+      }
+      if (char === "#" && (i === 0 || /\s/.test(value[i - 1]!))) {
+         return value.slice(0, i);
+      }
+   }
+   return value;
+}
+
+function unquoteYaml(value: string): string {
+   return value.length >= 2 && value[0] === value[value.length - 1] &&
+      (value[0] === "'" || value[0] === '"')
+      ? value.slice(1, -1)
+      : value;
+}
+
+function readContextInjectionLimits(projectRoot: string): ContextInjectionLimits {
+   const limits = { ...DEFAULT_CONTEXT_INJECTION_LIMITS };
+   let config = "";
+   try { config = readFileSync(join(projectRoot, ".trellis", "config.yaml"), "utf-8"); } catch { return limits; }
+
+   let inSection = false;
+   let sectionIndent = -1;
+   for (const rawLine of config.split(/\r?\n/)) {
+      const trimmed = rawLine.trim();
+      if (!inSection) {
+         if (/^context_injection\s*:\s*(#.*)?$/.test(trimmed)) {
+            inSection = true;
+            sectionIndent = rawLine.length - rawLine.trimStart().length;
+         }
+         continue;
+      }
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const indent = rawLine.length - rawLine.trimStart().length;
+      if (indent <= sectionIndent) break;
+      const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/);
+      if (!match || !(match[1] in limits)) continue;
+      const rawValue = unquoteYaml(stripInlineComment(match[2]!).trim()).trim();
+      if (!/^\d+$/.test(rawValue)) continue;
+      (limits as unknown as Record<string, number>)[match[1]!] = Number.parseInt(rawValue, 10);
+   }
+   return limits;
+}
+
+class ContextBudget {
+   used = 0;
+   constructor(private readonly maxTotalBytes: number) {}
+
+   hasRoom(bytes: number): boolean {
+      return this.maxTotalBytes <= 0 || this.used + bytes <= this.maxTotalBytes;
+   }
+
+   add(bytes: number): void {
+      this.used += bytes;
+   }
+}
+
+function truncateUtf8(data: Buffer, cap: number): Buffer {
+   if (cap <= 0 || data.length <= cap) return data;
+   let end = cap;
+   while (end > 0 && (data[end - 1]! & 0xc0) === 0x80) end--;
+   if (end === 0) return Buffer.alloc(0);
+   const lead = data[end - 1]!;
+   if (lead & 0x80) {
+      let sequenceLength = 1;
+      if ((lead & 0xe0) === 0xc0) sequenceLength = 2;
+      else if ((lead & 0xf0) === 0xe0) sequenceLength = 3;
+      else if ((lead & 0xf8) === 0xf0) sequenceLength = 4;
+      if (end - 1 + sequenceLength > cap) end--;
+   }
+   return data.subarray(0, end);
+}
+
+function isUtf8(data: Buffer): boolean {
+   try {
+      const decoded = data.toString("utf-8");
+      return Buffer.from(decoded, "utf-8").equals(data);
+   } catch {
+      return false;
+   }
+}
+
+function readFilePrefix(filePath: string, maxBytes: number): { data: Buffer; size: number } | null {
+   let fd: number | null = null;
+   try {
+      const size = statSync(filePath).size;
+      if (maxBytes <= 0 || size <= maxBytes) {
+         return { data: readFileSync(filePath), size };
+      }
+      fd = openSync(filePath, "r");
+      // Read a few extra bytes so a UTF-8 sequence crossing the cap can be
+      // validated before truncateUtf8 removes its incomplete suffix.
+      const data = Buffer.allocUnsafe(maxBytes + 4);
+      const bytesRead = readSync(fd, data, 0, data.length, 0);
+      return { data: data.subarray(0, bytesRead), size };
+   } catch {
+      return null;
+   } finally {
+      if (fd !== null) closeSync(fd);
+   }
+}
+
+function omittedNotice(file: string, size: number | null, reason: string): string {
+   const sizeText = size === null ? "unknown bytes" : `${size} bytes`;
+   return `### ${file} [omitted]\n\n[Trellis: omitted (${reason}) — ${file} (${sizeText}); required_read: ${file}]`;
+}
+
+function budgetedBlock(
+   budget: ContextBudget,
+   file: string,
+   content: string,
+   status: "inline" | "truncated",
+   size: number,
+   reason: string,
+): string {
+   const block = `### ${file} [${status}]\n\n${content}`;
+   if (budget.hasRoom(Buffer.byteLength(block, "utf-8"))) {
+      budget.add(Buffer.byteLength(block, "utf-8"));
+      return block;
+   }
+   const notice = omittedNotice(file, size, `total context limit reached: ${reason}`);
+   budget.add(Buffer.byteLength(notice, "utf-8"));
+   return notice;
+}
+
+function materializeFile(
+   targetPath: string,
+   displayPath: string,
+   reason: string,
+   limits: ContextInjectionLimits,
+   budget: ContextBudget,
+): string {
+   const file = readFilePrefix(targetPath, limits.max_file_bytes);
+   if (!file) {
+      return omittedNotice(displayPath, null, "file is missing or unreadable");
+   }
+   const { data, size } = file;
+   const truncated = truncateUtf8(data, limits.max_file_bytes);
+   if (truncated.includes(0) || !isUtf8(truncated)) {
+      const notice = omittedNotice(displayPath, size, `binary or non-UTF-8 file: ${reason}`);
+      budget.add(Buffer.byteLength(notice, "utf-8"));
+      return notice;
+   }
+   let content = truncated.toString("utf-8");
+   let status: "inline" | "truncated" = "inline";
+   if (truncated.length < size) {
+      status = "truncated";
+      content += `\n[Trellis: truncated at ${limits.max_file_bytes} bytes — read ${displayPath} for the full content]`;
+   }
+   return budgetedBlock(budget, displayPath, content, status, size, reason);
+}
+
+function materializeArtifact(
+   targetPath: string,
+   displayPath: string,
+   reason: string,
+   limits: ContextInjectionLimits,
+   budget: ContextBudget,
+): string {
+   const file = readFilePrefix(targetPath, limits.max_artifact_bytes);
+   if (!file) {
+      return omittedNotice(displayPath, null, "artifact is missing or unreadable");
+   }
+   const { data, size } = file;
+   const truncated = truncateUtf8(data, limits.max_artifact_bytes);
+   if (truncated.includes(0) || !isUtf8(truncated)) {
+      const notice = omittedNotice(displayPath, size, `binary or non-UTF-8 artifact: ${reason}`);
+      budget.add(Buffer.byteLength(notice, "utf-8"));
+      return notice;
+   }
+   let content = truncated.toString("utf-8");
+   let status: "inline" | "truncated" = "inline";
+   if (truncated.length < size) {
+      status = "truncated";
+      content += `\n[Trellis: truncated at ${limits.max_artifact_bytes} bytes — read ${displayPath} for the full content]`;
+   }
+   return budgetedBlock(budget, displayPath, content, status, size, reason);
+}
+
+function readJsonlLines(jsonlPath: string, displayPath: string): { lines: string[]; omitted: string | null } {
+   let size: number;
+   try {
+      size = statSync(jsonlPath).size;
+   } catch {
+      return { lines: [], omitted: null };
+   }
+   if (size > MAX_JSONL_BYTES) {
+      return {
+         lines: [],
+         omitted: omittedNotice(displayPath, size, `manifest exceeds ${MAX_JSONL_BYTES} byte parse limit`),
+      };
+   }
+   try {
+      return { lines: readFileSync(jsonlPath, "utf-8").split(/\r?\n/), omitted: null };
+   } catch {
+      return { lines: [], omitted: omittedNotice(displayPath, size, "manifest is missing or unreadable") };
+   }
+}
+
 function buildTaskContext(projectRoot: string, taskDir: string, agentType?: AgentType): string {
    const parts: string[] = [];
    // Resolved once per call (not per referenced file) — avoids re-parsing
    // config.yaml for every jsonl row.
    const trustedRoots = resolveTrustedRoots(projectRoot);
+   const limits = readContextInjectionLimits(projectRoot);
+   const budget = new ContextBudget(limits.max_total_bytes);
 
    // prd.md and info.md — always included
-   let prd = "";
-   try { prd = readFileSync(join(taskDir, "prd.md"), "utf-8"); } catch { }
-   if (prd.trim()) parts.push(`## PRD\n\n${prd.trim()}`);
-
-   let info = "";
-   try { info = readFileSync(join(taskDir, "info.md"), "utf-8"); } catch { }
-   if (info.trim()) parts.push(`## Info\n\n${info.trim()}`);
+   const prdPath = join(taskDir, "prd.md");
+   const relativePrdPath = displayProjectPath(projectRoot, prdPath, taskDir);
+   if (existsSync(prdPath)) parts.push(materializeArtifact(prdPath, relativePrdPath, "Requirements document", limits, budget));
+   const infoPath = join(taskDir, "info.md");
+   const relativeInfoPath = displayProjectPath(projectRoot, infoPath, taskDir);
+   if (existsSync(infoPath)) parts.push(materializeArtifact(infoPath, relativeInfoPath, "Task information", limits, budget));
 
    // Determine which jsonl files to read based on agent type
    const jsonlNames = taskContextJsonlNames(agentType);
@@ -351,15 +594,15 @@ function buildTaskContext(projectRoot: string, taskDir: string, agentType?: Agen
       const jsonlPath = join(taskDir, jsonlName);
       if (!existsSync(jsonlPath)) continue;
 
-      let lines: string[];
-      try {
-         lines = readFileSync(jsonlPath, "utf-8").split(/\r?\n/);
-      } catch {
+      const relativeJsonlPath = displayProjectPath(projectRoot, jsonlPath, taskDir);
+      const manifest = readJsonlLines(jsonlPath, relativeJsonlPath);
+      if (manifest.omitted) {
+         parts.push(`## ${jsonlName}\n\n${manifest.omitted}`);
          continue;
       }
 
       const fileChunks: string[] = [];
-      for (const line of lines) {
+      for (const line of manifest.lines) {
          const trimmed = line.trim();
          if (!trimmed) continue;
          try {
@@ -369,12 +612,8 @@ function buildTaskContext(projectRoot: string, taskDir: string, agentType?: Agen
             const targetPath = resolveProjectFile(projectRoot, file, trustedRoots);
             if (!targetPath) continue;
             if (includedPaths.has(targetPath)) continue;
-            let content = "";
-            try { content = readFileSync(targetPath, "utf-8"); } catch { }
-            if (content.trim()) {
-               includedPaths.add(targetPath);
-               fileChunks.push(`### ${file}\n\n${content.trim()}`);
-            }
+            includedPaths.add(targetPath);
+            fileChunks.push(materializeFile(targetPath, file, typeof row.reason === "string" ? row.reason : "-", limits, budget));
          } catch {
             // seed rows and malformed lines are non-fatal
          }
@@ -386,7 +625,7 @@ function buildTaskContext(projectRoot: string, taskDir: string, agentType?: Agen
    }
 
    return parts.length > 0
-      ? `<task-context>\n${parts.join("\n\n")}\n</task-context>`
+      ? `<task-context>\nContext is bounded by .trellis/config.yaml. Files marked [truncated] or [omitted] remain authoritative on disk; use their required_read path before relying on missing detail.\n\n${parts.join("\n\n")}\n</task-context>`
       : "";
 }
 
