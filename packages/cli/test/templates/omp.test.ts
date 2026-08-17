@@ -358,6 +358,83 @@ describe("omp templates", () => {
     }
   });
 
+  it("re-evaluates later budgeted files when an earlier file shrinks mid-session", async () => {
+    const project = makeOmpProject();
+    const messages: { customType?: string; content?: string }[] = [];
+
+    try {
+      fs.writeFileSync(
+        path.join(project.root, ".trellis", "config.yaml"),
+        "context_injection:\n  max_file_bytes: 0\n  max_artifact_bytes: 64\n  max_total_bytes: 900\n",
+      );
+      const earlierFile = path.join(project.root, "earlier.md");
+      fs.writeFileSync(earlierFile, "a".repeat(450));
+      fs.writeFileSync(path.join(project.root, "later.md"), "later content ".repeat(25));
+      fs.writeFileSync(
+        path.join(project.taskDir, "implement.jsonl"),
+        [
+          JSON.stringify({ file: "earlier.md", reason: "earlier budget consumer" }),
+          JSON.stringify({ file: "later.md", reason: "later candidate" }),
+        ].join("\n") + "\n",
+      );
+
+      const handlers = new Map<string, OmpEventHandler>();
+      loadOmpExtension()({
+        on: (event, handler) => handlers.set(event, handler),
+        sendMessage: async (message) =>
+          messages.push(message as { customType?: string; content?: string }),
+      });
+      const sessionStart = handlers.get("session_start");
+      const context = handlers.get("context");
+      if (!sessionStart || !context)
+        throw new Error("OMP extension did not register required handlers");
+      const ctx = {
+        cwd: project.root,
+        sessionManager: { getSessionId: () => project.sessionId },
+        ui: { notify: () => undefined },
+      };
+
+      await sessionStart({}, ctx);
+      const initial = messages.find(
+        (message) => message.customType === "trellis-task-context",
+      );
+      expect(initial?.content).toContain("earlier.md [inline]");
+      expect(initial?.content).toContain("later.md [omitted]");
+
+      fs.writeFileSync(earlierFile, "short earlier content");
+      const result = (await context(
+        {
+          messages: [
+            {
+              role: "custom",
+              customType: "trellis-task-context",
+              content: initial?.content,
+            },
+            {
+              role: "custom",
+              customType: "trellis-workflow-state",
+              content: "workflow",
+            },
+          ],
+        },
+        ctx,
+      )) as
+        | { messages?: { customType?: string; content?: string }[] }
+        | undefined;
+
+      const refreshed = result?.messages?.filter(
+        (message) => message.customType === "trellis-task-context",
+      );
+      expect(refreshed).toHaveLength(1);
+      expect(refreshed?.[0]?.content).toContain("short earlier content");
+      expect(refreshed?.[0]?.content).toContain("later.md [inline]");
+      expect(refreshed?.[0]?.content).toContain("later content");
+      expect(refreshed?.[0]?.content).not.toContain("later.md [omitted]");
+    } finally {
+      fs.rmSync(project.root, { recursive: true, force: true });
+    }
+  });
+
   it("bounds referenced files and marks truncated content as recoverable", async () => {
     const project = makeOmpProject();
     try {

@@ -311,13 +311,17 @@ function taskContextJsonlNames(agentType?: AgentType): string[] {
 
 function taskContextInputPaths(projectRoot: string, taskDir: string, agentType?: AgentType): string[] {
    const trustedRoots = resolveTrustedRoots(projectRoot);
-   const paths = new Set<string>([join(taskDir, "prd.md"), join(taskDir, "info.md")]);
+   const paths = new Set<string>([
+      join(projectRoot, ".trellis", "config.yaml"),
+      join(taskDir, "prd.md"),
+      join(taskDir, "info.md"),
+   ]);
    for (const jsonlName of taskContextJsonlNames(agentType)) {
       const jsonlPath = join(taskDir, jsonlName);
       paths.add(jsonlPath);
       if (!existsSync(jsonlPath)) continue;
-      let lines: string[];
-      try { lines = readFileSync(jsonlPath, "utf-8").split(/\r?\n/); } catch { continue; }
+      const displayPath = displayProjectPath(projectRoot, jsonlPath, taskDir);
+      const { lines } = readJsonlLines(jsonlPath, displayPath);
       for (const line of lines) {
          try {
             const row = JSON.parse(line.trim()) as Record<string, unknown>;
