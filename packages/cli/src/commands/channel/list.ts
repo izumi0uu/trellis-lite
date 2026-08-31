@@ -1,5 +1,5 @@
 /**
- * `trellis channel list` — table summary of all channels in `~/.trellis/channels/`.
+ * `trellis-lite channel list` — table summary of all channels in `~/.trellis/channels/`.
  *
  * Columns: name, created (ts), workers (alive/total), last activity, task.
  * Sorted by most recent activity first.

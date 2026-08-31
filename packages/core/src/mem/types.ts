@@ -1,5 +1,5 @@
 /**
- * Public input / output types for `@mindfoldhq/trellis-core/mem`.
+ * Public input / output types for `trellis-lite-core/mem`.
  *
  * This model serves persisted AI-session retrieval and dialogue-context
  * extraction only. It is intentionally separate from the channel event schema:
@@ -7,13 +7,7 @@
  * reads channel events.
  */
 
-export type MemSourceKind =
-  | "claude"
-  | "codex"
-  | "grok"
-  | "opencode"
-  | "pi"
-  | "zcode";
+export type MemSourceKind = "codex" | "omp";
 export type MemSourceFilter = MemSourceKind | "all";
 export type MemPhase = "brainstorm" | "implement" | "all";
 export type DialogueRole = "user" | "assistant";
@@ -55,7 +49,7 @@ export interface MemSessionInfo {
   created?: string;
   updated?: string;
   filePath: string;
-  /** OpenCode only: parent session id (sub-agent chain). */
+  /** Reserved for providers that expose a native parent session. */
   parent_id?: string;
 }
 
@@ -89,7 +83,7 @@ export interface MemSearchMatch {
   /** Weighted-density relevance score. */
   score: number;
   hit: SearchHit;
-  /** Sub-agent descendants merged into this match (OpenCode `--include-children`). */
+  /** Sub-agent descendants merged into this match. */
   descendantsMerged: number;
 }
 
@@ -179,7 +173,7 @@ export interface ListMemSessionsOptions {
 export interface SearchMemSessionsOptions {
   keyword: string;
   filter?: MemFilter;
-  /** Merge OpenCode sub-agent descendants into their parent before searching. */
+  /** Merge provider-native sub-agent descendants into their parent. */
   includeChildren?: boolean;
 }
 

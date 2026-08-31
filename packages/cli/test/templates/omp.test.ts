@@ -71,6 +71,46 @@ function makeOmpProject(): { root: string; taskDir: string; sessionId: string } 
   return { root, taskDir, sessionId };
 }
 
+async function captureProjectHandlers(root: string, sessionId: string): Promise<Map<string, OmpEventHandler>> {
+  const handlers = new Map<string, OmpEventHandler>();
+  loadOmpExtension()({
+    on: (event, handler) => handlers.set(event, handler),
+    sendMessage: async () => undefined,
+  });
+  const start = handlers.get("session_start");
+  if (!start) throw new Error("OMP extension did not register session_start");
+  await start({}, {
+    cwd: root,
+    sessionManager: { getSessionId: () => sessionId },
+    ui: { notify: () => undefined },
+  });
+  return handlers;
+}
+
+function writeLiteProfile(
+  taskDir: string,
+  overrides: Record<string, unknown> = {},
+): void {
+  fs.writeFileSync(path.join(taskDir, "task.json"), JSON.stringify({
+    status: "in_progress",
+    title: "Context limits",
+    lite: {
+      change_mode: "P0",
+      verification_level: "V3",
+      ui_verification_level: "U0",
+      checker: "off",
+      ui_driver: "ego-lite",
+      allowed_paths: ["frontend/**"],
+      forbidden_paths: ["backend/**"],
+      selected_by: "user",
+      scope_locked: true,
+      max_verification_passes: 8,
+      max_ui_verification_passes: 0,
+      ...overrides,
+    },
+  }));
+}
+
 async function runSessionStart(root: string, sessionId: string): Promise<string> {
   const messages: { customType?: string; content?: string }[] = [];
   const handlers = new Map<string, OmpEventHandler>();
@@ -190,6 +230,72 @@ describe("omp templates", () => {
     );
 
     expect(params).toEqual({ path: "README.md" });
+  });
+
+  it("blocks browser verification at U0 even when code verification is V3", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    writeLiteProfile(taskDir);
+    const handler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+    if (!handler) throw new Error("OMP extension did not register tool_call");
+
+    const result = await handler(
+      { type: "tool_call", toolName: "bash", input: { command: "npx playwright test" } },
+      { sessionManager: { getSessionId: () => sessionId } },
+    ) as { block?: boolean; reason?: string };
+
+    expect(result.block).toBe(true);
+    expect(result.reason).toContain("U0 forbids browser/UI verification");
+  });
+
+  it("requires explicit driver selection instead of falling back from Ego Lite", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    writeLiteProfile(taskDir, {
+      ui_verification_level: "U2",
+      max_ui_verification_passes: 1,
+    });
+    const handler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+    if (!handler) throw new Error("OMP extension did not register tool_call");
+
+    const result = await handler(
+      { type: "tool_call", toolName: "bash", input: { command: "npx cypress run" } },
+      { sessionManager: { getSessionId: () => sessionId } },
+    ) as { block?: boolean; reason?: string };
+
+    expect(result.block).toBe(true);
+    expect(result.reason).toContain("selected ego-lite");
+    expect(result.reason).toContain("explicit user authorization");
+  });
+
+  it("allows one explicitly selected Playwright pass and blocks the next", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    writeLiteProfile(taskDir, {
+      ui_verification_level: "U1",
+      ui_driver: "playwright",
+      max_ui_verification_passes: 1,
+    });
+    const handler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+    if (!handler) throw new Error("OMP extension did not register tool_call");
+    const event = { type: "tool_call", toolName: "bash", input: { command: "npx playwright test" } };
+    const ctx = { sessionManager: { getSessionId: () => sessionId } };
+
+    expect(await handler(event, ctx)).toBeUndefined();
+    const second = await handler(event, ctx) as { block?: boolean; reason?: string };
+    expect(second.block).toBe(true);
+    expect(second.reason).toContain("budget exhausted");
+  });
+
+  it("enforces Lite path allow and forbid boundaries for write tools", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    writeLiteProfile(taskDir);
+    const handler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+    if (!handler) throw new Error("OMP extension did not register tool_call");
+
+    const result = await handler(
+      { type: "tool_call", toolName: "write", input: { path: "backend/door.py", content: "guard" } },
+      { sessionManager: { getSessionId: () => sessionId } },
+    ) as { block?: boolean; reason?: string };
+    expect(result.block).toBe(true);
+    expect(result.reason).toContain("forbidden by Lite profile");
   });
 
   it("extension template contains session context injection markers", () => {

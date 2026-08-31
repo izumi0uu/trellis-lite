@@ -8,9 +8,9 @@ platform-specific blocks.
 
 Platform marker syntax in workflow.md:
 
-    [Claude Code, Cursor, ...]
+    [codex-sub-agent, Oh My Pi]
     agent-capable content
-    [/Claude Code, Cursor, ...]
+    [/codex-sub-agent, Oh My Pi]
 
 Provides:
     get_phase_index   - Extract the Phase Index section (no --step)
@@ -132,7 +132,7 @@ def get_step(step_id: str) -> str:
 
 
 def _platform_matches(platform: str, block_names: list[str]) -> bool:
-    """Case-insensitive fuzzy match: accept 'cursor', 'Cursor', 'claude-code', 'Claude Code'."""
+    """Case-insensitive match that ignores separators and spaces."""
     needle = platform.lower().replace("-", "").replace("_", "").replace(" ", "")
     for name in block_names:
         hay = name.lower().replace("-", "").replace("_", "").replace(" ", "")
@@ -142,21 +142,7 @@ def _platform_matches(platform: str, block_names: list[str]) -> bool:
 
 
 _PLATFORM_MARKER_LABELS: dict[str, str] = {
-    # workflow.md marker blocks label platforms with their product names, but
-    # every caller passes the stable id instead (`--platform {{CLI_FLAG}}` in
-    # the start / continue commands). `_platform_matches` only strips
-    # punctuation, so an id that is not its label-minus-spaces never matches and
-    # `filter_platform` drops the block WITHOUT error — the section just comes
-    # back empty. Four platforms shipped that way before this table existed.
-    #
-    # Add an entry whenever a platform's id is not its marker label with the
-    # separators removed. `test/registry-invariants.test.ts` asserts every
-    # registry id keeps a non-empty routing section, so a missing entry fails
-    # there rather than silently blanking that platform's routing.
-    "claude": "Claude Code",
-    "kimi": "Kimi Code",
     "omp": "Oh My Pi",
-    "dsh": "DeepSeek Harness",
 }
 
 
@@ -167,8 +153,7 @@ def resolve_effective_platform(platform: str, config: dict) -> str:
     default or ``"codex-inline"`` when explicitly configured in
     ``.trellis/config.yaml``. ``sub-agent`` remains an alias for ``auto``.
     ``filter_platform`` then surfaces blocks whose marker lists include the
-    namespaced name (e.g. ``[codex-sub-agent, ...]`` or ``[codex-inline, Kilo,
-    Antigravity, Devin]``).
+    namespaced name (``codex-sub-agent`` or ``codex-inline``).
 
     Native Codex context injection supports the ``auto`` default. Invalid
     explicit values fall back to ``inline`` safely; this renderer deliberately

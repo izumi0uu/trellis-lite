@@ -1,25 +1,19 @@
 #!/usr/bin/env node
 
 /**
- * Cross-platform script to copy template files to dist/
+ * Copy Trellis Lite template files to dist/
  *
  * This script copies src/templates/ to dist/templates/ (excluding .ts files).
  *
  * The templates are GENERIC templates for user projects:
  * - src/templates/trellis/ - Workflow scripts and config
- * - src/templates/claude/ - Claude Code commands, agents, hooks
- * - src/templates/cursor/ - Cursor commands
- * - src/templates/iflow/ - iFlow CLI commands, agents, hooks
- * - src/templates/opencode/ - OpenCode commands, agents, hooks
  * - src/templates/codex/ - Codex agents, hooks, config
- * - src/templates/kilo/ - Kilo CLI commands
- * - src/templates/antigravity/ - Antigravity workflows
- * - src/templates/kiro/ - Kiro Code skills
- * - src/templates/gemini/ - Gemini CLI commands (TOML)
+ * - src/templates/omp/ - OMP agents and native extension
+ * - src/templates/common/ - shared commands and skills
  * - src/templates/markdown/ - Markdown templates (spec, guides)
  *
- * Note: We NO LONGER copy from the project's own .trellis/, .cursor/, .claude/
- * because those may be customized for the Trellis project itself.
+ * Project-local generated files are never used as template sources because
+ * they may be customized.
  */
 
 import { cpSync, readdirSync, statSync, mkdirSync } from "node:fs";

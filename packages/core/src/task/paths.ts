@@ -6,7 +6,7 @@
  *
  *     <tasks-dir>/05-13-trellis-core-sdk-package/
  *
- * Trellis also creates system onboarding tasks during `trellis init` using a
+ * Trellis also creates system onboarding tasks during `trellis-lite init` using a
  * `00-slug` prefix, such as `00-bootstrap-guidelines` and `00-join-new-developer`.
  *
  * `MM` is the two-digit month, `DD` is the two-digit day, and `slug` is

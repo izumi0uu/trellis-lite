@@ -1,5 +1,5 @@
 /**
- * mem.ts — CLI wrapper over `@mindfoldhq/trellis-core/mem`.
+ * mem.ts — CLI wrapper over `trellis-lite-core/mem`.
  *
  * The reusable retrieval / context-extraction logic lives in core; this file
  * owns only CLI concerns: argument parsing, terminal rendering, warning
@@ -12,7 +12,7 @@
  *   extract <session-id>          dump cleaned dialogue (use --grep KW to filter turns)
  *   projects                      list active project cwds (AI-routing entry point)
  *
- * Run `trellis mem help` for the full flag reference.
+ * Run `trellis-lite mem help` for the full flag reference.
  */
 
 import * as os from "node:os";
@@ -25,14 +25,14 @@ import {
   MemSessionNotFoundError,
   readMemContext,
   searchMemSessions,
-} from "@mindfoldhq/trellis-core/mem";
+} from "trellis-lite-core/mem";
 import type {
   MemFilter,
   MemPhase,
   MemSessionInfo,
   MemSourceFilter,
   MemSourceKind,
-} from "@mindfoldhq/trellis-core/mem";
+} from "trellis-lite-core/mem";
 
 // ---------- argv ----------
 
@@ -65,15 +65,7 @@ export function parseArgv(argv: readonly string[]): Argv {
   return { cmd, positional, flags };
 }
 
-const VALID_PLATFORMS: readonly string[] = [
-  "claude",
-  "codex",
-  "grok",
-  "opencode",
-  "pi",
-  "zcode",
-  "all",
-];
+const VALID_PLATFORMS: readonly string[] = ["codex", "omp", "all"];
 
 /** Translate parsed CLI flags into a core `MemFilter`. Validation failures
  * exit the process — core never sees raw CLI flags. */
@@ -453,7 +445,7 @@ function cmdExtract(argv: Argv): void {
 }
 
 function cmdHelp(): void {
-  console.log(`trellis mem — list/search Claude/Codex/Grok/OpenCode/Pi/ZCode sessions
+  console.log(`trellis-lite mem — list/search Codex and Oh My Pi sessions
 
 commands:
   list                          list sessions (default if no command)
@@ -465,7 +457,7 @@ commands:
                                 use this to discover which --cwd to pass to search
 
 flags:
-  --platform claude|codex|grok|opencode|pi|zcode|all   default all
+  --platform codex|omp|all                 default all
   --since YYYY-MM-DD                     inclusive lower bound
   --until YYYY-MM-DD                     inclusive upper bound
   --global                               include all projects (default: cwd-scoped)
@@ -474,20 +466,20 @@ flags:
   --grep KW                              extract / context: filter turns by keyword (multi-token AND)
   --phase brainstorm|implement|all       extract: slice by Trellis brainstorm windows
                                          (default all; brainstorm = [task.py create, task.py start);
-                                         Claude/Codex/Grok/Pi/ZCode supported; OpenCode warns + returns all)
+                                         Codex and OMP supported)
   --turns N                              context: number of hit turns to return (default 3)
   --around N                             context: turns of surrounding context per hit (default 1)
   --max-chars N                          context: total char budget (default 6000, ~1500 tokens)
-  --include-children                     search / context: merge OpenCode sub-agent sessions into parent
+  --include-children                     search / context: merge native child sessions into parent
   --json                                 emit JSON
   --help, -h                             show this help
 
 examples:
-  trellis mem list
-  trellis mem list --global --platform claude --since 2026-04-01
-  trellis mem search "session insight" --global
-  trellis mem extract 5842592d --grep memory
-  trellis mem extract 5842592d --phase brainstorm
+  trellis-lite mem list
+  trellis-lite mem list --global --platform omp --since 2026-04-01
+  trellis-lite mem search "session insight" --global
+  trellis-lite mem extract 5842592d --grep memory
+  trellis-lite mem extract 5842592d --phase brainstorm
 `);
 }
 

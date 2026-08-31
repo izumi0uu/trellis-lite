@@ -9,7 +9,7 @@ Thanks for your interest in contributing to Trellis! This document provides guid
 Before creating a bug report, please check [existing issues](https://github.com/mindfold-ai/Trellis/issues) to avoid duplicates.
 
 When reporting a bug, include:
-- Trellis version (`trellis --version`)
+- Trellis version (`trellis-lite --version`)
 - Node.js version (`node --version`)
 - Operating system
 - Steps to reproduce
@@ -81,24 +81,19 @@ pnpm typecheck   # TypeScript type checking
 ## Project Structure
 
 ```
-Trellis/
-├── src/                    # TypeScript source code
-│   ├── cli/                # CLI entry point
-│   ├── commands/           # CLI commands (init, update)
-│   ├── configurators/      # Template application logic
-│   ├── templates/          # Templates copied to user projects ←
-│   └── utils/              # Utility functions
-├── .claude/                # Claude Code config (project's own) ←
-│   ├── agents/             # Agent definitions
-│   ├── commands/           # Slash commands
-│   └── hooks/              # Python hook scripts
-├── .trellis/               # Trellis workflow (project's own) ←
-│   ├── scripts/            # Bash scripts
-│   └── spec/               # Spec file templates
-└── docs/                   # Documentation
+trellis-lite/
+├── packages/
+│   ├── cli/                # CLI, configurators, Codex/OMP templates
+│   └── core/               # Task, channel, and memory primitives
+├── .codex/                 # Codex project integration
+├── .omp/                   # OMP project integration
+├── .agents/skills/         # Skills shared by Codex and OMP
+└── .trellis/               # Workflow, scripts, specs, tasks, and journals
 ```
 
-> **Important:** When modifying `.claude/`, `.trellis/`, or `.cursor/`, check if the same changes need to be applied to `src/templates/`. The project uses its own config files, but templates are what gets installed to user projects.
+> **Important:** Generated project files and their sources under
+> `packages/cli/src/templates/` must stay in sync. Codex and OMP are the only
+> active platform targets.
 
 ## Commit Guidelines
 

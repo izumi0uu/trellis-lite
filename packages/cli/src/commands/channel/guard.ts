@@ -21,7 +21,7 @@ import {
   reduceWorkerRegistry,
   type ChannelEvent,
   type WorkerState,
-} from "@mindfoldhq/trellis-core/channel";
+} from "trellis-lite-core/channel";
 
 import { DIR_NAMES } from "../../constants/paths.js";
 
@@ -640,9 +640,9 @@ export function formatBudgetOverflowError(args: {
     .join("\n");
   const hint = [
     "Free a slot before spawning, e.g.:",
-    `  trellis channel kill <channel> --as <worker>`,
+    `  trellis-lite channel kill <channel> --as <worker>`,
     "Or override per spawn:",
-    `  trellis channel spawn ... --max-live-workers ${live.length + 1}`,
+    `  trellis-lite channel spawn ... --max-live-workers ${live.length + 1}`,
     "Or raise the default in .trellis/config.yaml under channel.worker_guard.max_live_workers.",
   ].join("\n");
   return [header, rows, hint].join("\n");

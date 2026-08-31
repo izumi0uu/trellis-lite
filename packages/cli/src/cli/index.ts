@@ -38,10 +38,10 @@ function checkForUpdates(cwd: string): void {
     // CLI is newer than project - update available
     console.log(
       chalk.yellow(
-        `\n⚠️  Trellis update available: ${projectVersion} → ${cliVersion}`,
+        `\n⚠️  Trellis Lite update available: ${projectVersion} → ${cliVersion}`,
       ),
     );
-    console.log(chalk.gray(`   Run: trellis update\n`));
+    console.log(chalk.gray(`   Run: trellis-lite update\n`));
   } else if (comparison < 0) {
     // CLI is older than project - CLI needs updating
     console.log(
@@ -49,7 +49,7 @@ function checkForUpdates(cwd: string): void {
         `\n⚠️  Your CLI (${cliVersion}) is older than project (${projectVersion})`,
       ),
     );
-    console.log(chalk.gray(`   Run: trellis upgrade\n`));
+    console.log(chalk.gray(`   Run: trellis-lite upgrade\n`));
   }
 }
 
@@ -62,42 +62,17 @@ if (fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW))) {
 const program = new Command();
 
 program
-  .name("trellis")
+  .name("trellis-lite")
   .description(
-    "AI-assisted development workflow framework for Cursor, Claude Code and more",
+    "Bounded AI development workflow for Codex and Oh My Pi (P/V/U profiles)",
   )
   .version(VERSION, "-v, --version", "output the version number");
 
 program
   .command("init")
-  .description("Initialize trellis in the current project")
-  .option("--cursor", "Include Cursor commands")
-  .option("--claude", "Include Claude Code commands")
-  .option("--opencode", "Include OpenCode commands")
+  .description("Initialize Trellis Lite in the current project")
   .option("--codex", "Include Codex skills")
-  .option("--kilo", "Include Kilo CLI commands")
-  .option("--kiro", "Include Kiro Code skills")
-  .option("--gemini", "Include Gemini CLI commands")
-  .option("--antigravity", "Include Antigravity workflows")
-  .option("--devin", "Include Devin workflows")
-  .option("--windsurf", "Deprecated alias for --devin (Windsurf was renamed)")
-  .option("--qoder", "Include Qoder commands")
-  .option("--codebuddy", "Include CodeBuddy commands")
-  .option("--copilot", "Include GitHub Copilot hooks")
-  .option("--droid", "Include Factory Droid commands")
-  .option("--dsh", "Include DeepSeek Harness (dsh) skills")
-  .option("--pi", "Include Pi Agent extension assets")
-  .option("--reasonix", "Include Reasonix skills")
-  .option("--zcode", "Include ZCode commands")
   .option("--omp", "Include Oh My Pi extension assets")
-  .option("--trae", "Include Trae IDE commands")
-  .option("--grok", "Include Grok Build skills and agents")
-  .option("--kimi", "Include Kimi Code skills")
-  .option("--snow", "Include Snow CLI skills and commands")
-  .option(
-    "--with-statusline",
-    "Install the Trellis statusLine for Claude Code (off by default)",
-  )
   .option("-y, --yes", "Skip prompts and use defaults")
   .option(
     "-u, --user <name>",
@@ -130,16 +105,6 @@ program
   )
   .action(async (options: Record<string, unknown>) => {
     try {
-      // Deprecated alias: --windsurf → --devin (Windsurf was renamed to Devin).
-      if (options.windsurf) {
-        console.log(
-          chalk.yellow(
-            "⚠ --windsurf is deprecated (Windsurf was renamed to Devin). Use --devin instead.",
-          ),
-        );
-        options.devin = true;
-        delete options.windsurf;
-      }
       await init(options);
     } catch (error) {
       console.error(
@@ -155,7 +120,7 @@ program
 
 program
   .command("update")
-  .description("Update trellis configuration and commands to latest version")
+  .description("Update Trellis Lite project files to the installed CLI version")
   .option("--dry-run", "Preview changes without applying them")
   .option("-f, --force", "Overwrite all changed files without asking")
   .option("-s, --skip-all", "Skip all changed files without asking")
@@ -186,7 +151,7 @@ program
 
 program
   .command("upgrade")
-  .description("Upgrade the global Trellis CLI package")
+  .description("Upgrade the global Trellis Lite CLI package")
   .option(
     "--tag <tag>",
     "npm dist-tag or version to install (default follows current channel: latest, beta, or rc)",
@@ -213,7 +178,7 @@ program
 program
   .command("uninstall")
   .description(
-    "Remove all trellis files (managed platform files + .trellis/) from this project",
+    "Remove all Trellis Lite files (managed platform files + .trellis/) from this project",
   )
   .option("-y, --yes", "Skip confirmation prompt")
   .option("--dry-run", "List what would be removed without changing anything")
@@ -262,7 +227,7 @@ program
 
 program
   .command("restore")
-  .description("Restore the exact project state saved by `trellis ablate`")
+  .description("Restore the exact project state saved by `trellis-lite ablate`")
   .option("-y, --yes", "Skip confirmation prompt")
   .option("--dry-run", "Preview restoration and check conflicts")
   .action(async (options: Record<string, unknown>) => {
@@ -286,7 +251,7 @@ program
 program
   .command("mem")
   .description(
-    "Search/recall AI conversation history across Claude Code, Codex, OpenCode, Pi (run 'trellis mem help' for subcommands and flags)",
+    "Search/recall Codex and Oh My Pi conversation history (run 'trellis-lite mem help' for subcommands and flags)",
   )
   .allowUnknownOption(true)
   .helpOption(false)

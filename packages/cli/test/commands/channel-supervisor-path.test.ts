@@ -36,14 +36,14 @@ describe("resolveProviderPath", () => {
 
   it("resolves direct exe npm shims without prefix args", () => {
     const exePath = writeShimTarget(
-      "node_modules\\@anthropic-ai\\claude\\claude.exe",
+      "node_modules\\@openai\\codex\\codex.exe",
     );
     fs.writeFileSync(
-      path.join(tmpDir, "claude.cmd"),
-      '@IF EXIST "%dp0%\\node_modules\\@anthropic-ai\\claude\\claude.exe" "%dp0%\\node_modules\\@anthropic-ai\\claude\\claude.exe" %*\r\n',
+      path.join(tmpDir, "codex.cmd"),
+      '@IF EXIST "%dp0%\\node_modules\\@openai\\codex\\codex.exe" "%dp0%\\node_modules\\@openai\\codex\\codex.exe" %*\r\n',
       "utf8",
     );
-    expect(resolveProviderPath("claude")).toEqual({
+    expect(resolveProviderPath("codex")).toEqual({
       command: exePath,
       prefixArgs: [],
     });

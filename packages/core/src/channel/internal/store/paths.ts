@@ -16,8 +16,7 @@ export function channelRoot(): string {
 }
 
 /**
- * Derive a per-project bucket name from an absolute cwd, mirroring
- * Claude Code's `~/.claude/projects/<sanitized-cwd>/` convention.
+ * Derive a stable per-project bucket name from an absolute cwd.
  */
 export function projectKey(cwd: string): string {
   const abs = path.resolve(cwd);

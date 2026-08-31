@@ -123,18 +123,20 @@ After implementation:
 
 ---
 
-## Cross-Platform Template Consistency
+## Codex/OMP Template Consistency
 
-In Trellis, command templates (e.g., `record-session.md`) exist in **multiple platforms** with identical or near-identical content. This is a cross-layer boundary.
+Trellis Lite has two platform surfaces. Shared behavior must stay aligned while
+platform-native hooks and extensions remain intentionally different.
 
-### Checklist: After Modifying Any Command Template
+### Checklist: After Modifying Shared Workflow Behavior
 
-- [ ] Find all platforms with the same command: `find src/templates/*/commands/trellis/ -name "<command>.*"`
-- [ ] Update all platform copies (Markdown `.md` and TOML `.toml`)
-- [ ] For Gemini TOML: adapt line continuations (`\\` vs `\`) and triple-quoted strings
-- [ ] Run `/trellis:check-cross-layer` to verify nothing was missed
+- [ ] Check both `templates/codex/` and `templates/omp/`
+- [ ] Keep shared skills under `.agents/skills/` byte-identical
+- [ ] Preserve the native integration boundary: Codex hooks, OMP extension
+- [ ] Run the focused Codex/OMP template tests
 
-**Real-world example**: Updated `record-session.md` in Claude to use `--mode record`, but forgot iFlow, Kilo, OpenCode, and Gemini — caught by cross-layer check.
+**Example**: A workflow marker may need matching handling in the Codex Python
+hook and the OMP TypeScript extension even when their transport APIs differ.
 
 ---
 
@@ -187,7 +189,7 @@ audit for beta markers against the root release tree.
 **Real-world example**: Codex inline mode changed workflow platform markers from
 `[Codex]` / `[Kilo, Antigravity, Windsurf]` to `[codex-sub-agent]` /
 `[codex-inline, Kilo, Antigravity, Windsurf]`. Fresh init was correct, but
-`trellis update` only merged `[workflow-state:*]` blocks and preserved stale
+`trellis-lite update` only merged `[workflow-state:*]` blocks and preserved stale
 markers outside those blocks. Result: upgraded projects got new hook scripts
 but old workflow routing, so `get_context.py --mode phase --platform codex`
 could return empty Phase 2.1 detail.
@@ -216,22 +218,24 @@ When a CLI auto-detects a mode by probing a remote resource (e.g., checking if `
 
 **Real-world example**: Custom registry flow had 8 bugs across 3 review rounds: (1) probe only ran in interactive mode, (2) transient errors fell through to wrong mode, (3) giget URI had `#ref` in wrong position, (4) prefetched templates leaked across source switches, (5) `--template` shortcut bypassed probe but `downloadTemplateById` internally used catch-all `fetchTemplateIndex`, turning timeouts into "Template not found".
 
-**Real-world example**: Agent-session update hints fetched npm `latest` metadata with `response.read(4096)` and then parsed it as complete JSON. The `@mindfoldhq/trellis` package metadata exceeded 4 KB, so the JSON was truncated, parse failed silently, and the first session injection showed no update hint. Fix: read the complete response before parsing, and add a regression where `version` is followed by an 8 KB metadata tail.
+**Real-world example**: Agent-session update hints fetched npm `latest` metadata with `response.read(4096)` and then parsed it as complete JSON. The `trellis-lite` package metadata exceeded 4 KB, so the JSON was truncated, parse failed silently, and the first session injection showed no update hint. Fix: read the complete response before parsing, and add a regression where `version` is followed by an 8 KB metadata tail.
 
 ---
 
-## Cross-Platform Template Consistency
+## Codex/OMP Template Consistency
 
-In Trellis, command templates (e.g., `record-session.md`) exist in **multiple platforms** with identical or near-identical content. This is a cross-layer boundary.
+Trellis Lite has two platform surfaces. Shared behavior must stay aligned while
+platform-native hooks and extensions remain intentionally different.
 
-### Checklist: After Modifying Any Command Template
+### Checklist: After Modifying Shared Workflow Behavior
 
-- [ ] Find all platforms with the same command: `find src/templates/*/commands/trellis/ -name "<command>.*"`
-- [ ] Update all platform copies (Markdown `.md` and TOML `.toml`)
-- [ ] For Gemini TOML: adapt line continuations (`\\` vs `\`) and triple-quoted strings
-- [ ] Run `/trellis:check-cross-layer` to verify nothing was missed
+- [ ] Check both `templates/codex/` and `templates/omp/`
+- [ ] Keep shared skills under `.agents/skills/` byte-identical
+- [ ] Preserve the native integration boundary: Codex hooks, OMP extension
+- [ ] Run the focused Codex/OMP template tests
 
-**Real-world example**: Updated `record-session.md` in Claude to use `--mode record`, but forgot iFlow, Kilo, OpenCode, and Gemini — caught by cross-layer check.
+**Example**: A workflow marker may need matching handling in the Codex Python
+hook and the OMP TypeScript extension even when their transport APIs differ.
 
 ---
 
@@ -257,7 +261,7 @@ against both fresh init and upgrade paths.
 **Real-world example**: Codex inline mode changed workflow platform markers from
 `[Codex]` / `[Kilo, Antigravity, Windsurf]` to `[codex-sub-agent]` /
 `[codex-inline, Kilo, Antigravity, Windsurf]`. Fresh init was correct, but
-`trellis update` only merged `[workflow-state:*]` blocks and preserved stale
+`trellis-lite update` only merged `[workflow-state:*]` blocks and preserved stale
 markers outside those blocks. Result: upgraded projects got new hook scripts
 but old workflow routing, so `get_context.py --mode phase --platform codex`
 could return empty Phase 2.1 detail.
@@ -284,7 +288,7 @@ When a CLI auto-detects a mode by probing a remote resource (e.g., checking if `
 
 **Real-world example**: Custom registry flow had 8 bugs across 3 review rounds: (1) probe only ran in interactive mode, (2) transient errors fell through to wrong mode, (3) giget URI had `#ref` in wrong position, (4) prefetched templates leaked across source switches, (5) `--template` shortcut bypassed probe but `downloadTemplateById` internally used catch-all `fetchTemplateIndex`, turning timeouts into "Template not found".
 
-**Real-world example**: Agent-session update hints fetched npm `latest` metadata with `response.read(4096)` and then parsed it as complete JSON. The `@mindfoldhq/trellis` package metadata exceeded 4 KB, so the JSON was truncated, parse failed silently, and the first session injection showed no update hint. Fix: read the complete response before parsing, and add a regression where `version` is followed by an 8 KB metadata tail.
+**Real-world example**: Agent-session update hints fetched npm `latest` metadata with `response.read(4096)` and then parsed it as complete JSON. The `trellis-lite` package metadata exceeded 4 KB, so the JSON was truncated, parse failed silently, and the first session injection showed no update hint. Fix: read the complete response before parsing, and add a regression where `version` is followed by an 8 KB metadata tail.
 
 ---
 

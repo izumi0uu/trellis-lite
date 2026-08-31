@@ -1,20 +1,20 @@
 # Workers And Agent Cards
 
 Use workers when a peer agent should execute independently and report back
-through the channel event log. A worker is a registered child process (claude
-or codex) attached to a channel; the supervisor forwards inbox messages to it
+through the channel event log. A worker is a registered Codex child process
+attached to a channel; the supervisor forwards inbox messages to it
 and translates its output back into channel events.
 
 ## Spawn
 
 ```bash
-trellis channel create impl-task --by dispatcher --cwd /path/to/repo
-trellis channel spawn impl-task --provider codex --as codex-impl --timeout 30m
+trellis-lite channel create impl-task --by dispatcher --cwd /path/to/repo
+trellis-lite channel spawn impl-task --provider codex --as codex-impl --timeout 30m
 
 echo "Implement the schema for table X per .trellis/.../prd.md" \
-  | trellis channel send impl-task --as dispatcher --to codex-impl --stdin
+  | trellis-lite channel send impl-task --as dispatcher --to codex-impl --stdin
 
-trellis channel wait impl-task --as dispatcher --from codex-impl --kind done --timeout 30m
+trellis-lite channel wait impl-task --as dispatcher --from codex-impl --kind done --timeout 30m
 ```
 
 `spawn` forks a `channel __supervisor` worker that emits `spawned`, streams
@@ -25,11 +25,11 @@ inbox-idle until a `send --to <worker>` (or a broadcast when
 Key `spawn` flags:
 
 - `--agent <name>` — load `.trellis/agents/<name>.md` (provider/model/as/system prompt defaults).
-- `--provider <claude|codex>` — overrides the agent card; validated against the adapter registry.
+- `--provider codex` — overrides the agent card; validated against the adapter registry.
 - `--as <name>` — channel worker handle; defaults to the agent name.
 - `--cwd <path>` — worker working directory (also the jail root for `--file`/`--jsonl`).
 - `--model <id>` — model override.
-- `--resume <id>` — resume an existing claude session / codex thread.
+- `--resume <id>` — resume an existing Codex thread.
 - `--timeout <duration>` — auto-kill after `30s` / `2m` / `1h`.
 - `--warn-before <duration>` — supervisor_warning lead time (default `5m`; `0ms` disables).
 - `--file <path>` (repeatable, glob-supported) — inject file content into the system prompt.
@@ -54,7 +54,7 @@ match `[A-Za-z0-9._-]+`. The default Trellis install ships two cards:
 ---
 name: check
 description: Code quality check expert.
-provider: claude
+provider: codex
 ---
 ```
 
@@ -92,7 +92,7 @@ Example spawning a check agent against a task directory:
 
 ```bash
 TASK=.trellis/tasks/05-13-example
-trellis channel spawn cr-example --agent check --provider codex --as check-cx \
+trellis-lite channel spawn cr-example --agent check --provider codex --as check-cx \
   --file "$TASK/prd.md" \
   --file "$TASK/design.md" \
   --file "$TASK/implement.md" \
@@ -111,15 +111,14 @@ actually shown.
 - `send` / `wait` / `interrupt`: speaker identity (author of the resulting event).
 - `spawn`: the worker handle that other agents address with `--to`.
 
-Use explicit names when multiple workers or providers participate in one
-channel:
+Use explicit names when multiple workers participate in one channel:
 
 ```bash
-trellis channel spawn cr-feature --agent check --as check-claude
-trellis channel spawn cr-feature --agent check --provider codex --as check-cx
+trellis-lite channel spawn cr-feature --agent check --as check-one
+trellis-lite channel spawn cr-feature --agent check --provider codex --as check-two
 
-trellis channel wait cr-feature --as main \
-  --from check-claude,check-cx --kind done --all --timeout 15m
+trellis-lite channel wait cr-feature --as main \
+  --from check-one,check-two --kind done --all --timeout 15m
 ```
 
 `--all` requires `--from` and blocks until every listed worker has produced a
@@ -136,7 +135,7 @@ losing its session.
 
 ```bash
 echo "Stop refactoring the parser — switch to fixing the failing test in src/foo.ts" \
-  | trellis channel interrupt impl-task --as dispatcher --to codex-impl --stdin
+  | trellis-lite channel interrupt impl-task --as dispatcher --to codex-impl --stdin
 ```
 
 Flags:
@@ -156,7 +155,7 @@ plain tagged message instead:
 
 ```bash
 echo "Check this when you reach the next turn." \
-  | trellis channel send impl-task --as dispatcher --to codex-impl \
+  | trellis-lite channel send impl-task --as dispatcher --to codex-impl \
       --stdin --tag question
 ```
 
@@ -169,12 +168,12 @@ writes a `killed` event when SIGKILL is needed so the event log stays
 truthful.
 
 ```bash
-trellis channel kill impl-task --as codex-impl
-trellis channel spawn impl-task --as codex-impl --provider codex \
+trellis-lite channel kill impl-task --as codex-impl
+trellis-lite channel spawn impl-task --as codex-impl --provider codex \
   --resume "$(cat ~/.trellis/channels/<bucket>/impl-task/worker.session-id)"
 
 echo "STOP — new instructions: ..." \
-  | trellis channel send impl-task --as dispatcher --to codex-impl --stdin
+  | trellis-lite channel send impl-task --as dispatcher --to codex-impl --stdin
 ```
 
 `kill` flags:
@@ -260,15 +259,15 @@ A typical dispatcher loop:
 ```bash
 # 1. Wake the worker.
 echo "Run the failing test and report." \
-  | trellis channel send impl-task --as dispatcher --to codex-impl --stdin \
+  | trellis-lite channel send impl-task --as dispatcher --to codex-impl --stdin \
       --delivery-mode requireRunningWorker
 
 # 2. Block until it finishes.
-trellis channel wait impl-task --as dispatcher \
+trellis-lite channel wait impl-task --as dispatcher \
   --from codex-impl --kind done,error --timeout 30m
 
 # 3. Read the final answer.
-trellis channel messages impl-task --from codex-impl --last 1 --raw
+trellis-lite channel messages impl-task --from codex-impl --last 1 --raw
 ```
 
 All event-emitting subcommands (`send`, `interrupt`, `post`, `context add` /

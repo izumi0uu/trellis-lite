@@ -46,12 +46,6 @@ import {
   workflowMdTemplate,
 } from "../templates/trellis/index.js";
 import { agentsMdContent } from "../templates/markdown/index.js";
-import {
-  COPILOT_INSTRUCTIONS_BLOCK_END,
-  COPILOT_INSTRUCTIONS_BLOCK_START,
-  COPILOT_INSTRUCTIONS_PATH,
-  getCopilotInstructions,
-} from "../templates/copilot/index.js";
 
 import {
   ALL_MANAGED_DIRS,
@@ -60,7 +54,6 @@ import {
 } from "../configurators/index.js";
 import { replacePythonCommandLiterals } from "../configurators/shared.js";
 import { preserveCodexAgentModelKeys } from "../configurators/codex.js";
-import { printZcodeSetupHint } from "../configurators/zcode.js";
 import { ensureGitattributes } from "../configurators/workflow.js";
 import { pruneOrphanManifestKeys } from "../utils/manifest-prune.js";
 import {
@@ -112,7 +105,6 @@ interface ChangeAnalysis {
 
 type ConflictAction = "overwrite" | "skip" | "create-new";
 
-const CLAUDE_SETTINGS_PATH = ".claude/settings.json";
 const LEGACY_UNTRACKED_AGENTS_MD_BLOCK_HASHES = new Set<string>([
   // v0.5.0-beta.17 and earlier wrote AGENTS.md but did not hash-track it.
   // This hash is the pristine Trellis-managed block before the Subagents
@@ -245,16 +237,6 @@ function buildAgentsMdTemplate(cwd: string): string {
   );
 }
 
-function buildCopilotInstructionsTemplate(cwd: string): string {
-  return buildManagedBlockTemplate(
-    cwd,
-    COPILOT_INSTRUCTIONS_PATH,
-    getCopilotInstructions(),
-    COPILOT_INSTRUCTIONS_BLOCK_START,
-    COPILOT_INSTRUCTIONS_BLOCK_END,
-  );
-}
-
 function isKnownUntrackedTemplate(
   relativePath: string,
   existingContent: string,
@@ -269,35 +251,6 @@ function isKnownUntrackedTemplate(
   }
 
   return LEGACY_UNTRACKED_AGENTS_MD_BLOCK_HASHES.has(computeHash(managedBlock));
-}
-
-function isSafeUntrackedCopilotInstructionsMerge(
-  relativePath: string,
-  existingContent: string,
-  newContent: string,
-): boolean {
-  if (relativePath !== COPILOT_INSTRUCTIONS_PATH) {
-    return false;
-  }
-
-  if (
-    getManagedBlock(
-      existingContent,
-      COPILOT_INSTRUCTIONS_BLOCK_START,
-      COPILOT_INSTRUCTIONS_BLOCK_END,
-    )
-  ) {
-    return false;
-  }
-
-  return (
-    mergeManagedBlockContent(
-      existingContent,
-      getCopilotInstructions(),
-      COPILOT_INSTRUCTIONS_BLOCK_START,
-      COPILOT_INSTRUCTIONS_BLOCK_END,
-    ) === newContent
-  );
 }
 
 /**
@@ -703,44 +656,6 @@ function needsCodexUpgrade(cwd: string): boolean {
   return true;
 }
 
-function preserveExistingClaudeStatusLine(
-  cwd: string,
-  templates: Map<string, string>,
-): void {
-  const newSettingsContent = templates.get(CLAUDE_SETTINGS_PATH);
-  if (!newSettingsContent) return;
-
-  const settingsPath = path.join(cwd, CLAUDE_SETTINGS_PATH);
-  if (!fs.existsSync(settingsPath)) return;
-
-  try {
-    const existingSettings = JSON.parse(
-      fs.readFileSync(settingsPath, "utf-8"),
-    ) as Record<string, unknown>;
-
-    if (!Object.prototype.hasOwnProperty.call(existingSettings, "statusLine")) {
-      return;
-    }
-
-    const newSettings = JSON.parse(newSettingsContent) as Record<
-      string,
-      unknown
-    >;
-
-    if (Object.prototype.hasOwnProperty.call(newSettings, "statusLine")) {
-      return;
-    }
-
-    newSettings.statusLine = existingSettings.statusLine;
-    templates.set(
-      CLAUDE_SETTINGS_PATH,
-      `${JSON.stringify(newSettings, null, 2)}\n`,
-    );
-  } catch {
-    // Invalid local JSON is handled by the normal conflict path.
-  }
-}
-
 function preserveExistingRegistryConfig(cwd: string, template: string): string {
   const registry = loadSpecRegistryConfig(cwd);
   if (!registry) return template;
@@ -750,7 +665,7 @@ function preserveExistingRegistryConfig(cwd: string, template: string): string {
     "#-------------------------------------------------------------------------------\n" +
     "# Registry\n" +
     "#-------------------------------------------------------------------------------\n\n" +
-    "# Source used to install .trellis/spec. trellis update refreshes this\n" +
+    "# Source used to install .trellis/spec. trellis-lite update refreshes this\n" +
     "# hash-tracked spec template while preserving local edits through the\n" +
     "# normal update conflict flow.\n" +
     "registry:\n" +
@@ -880,7 +795,7 @@ async function collectTemplateFiles(
   }
 
   // Channel runtime agent definitions (single source of truth: getAllAgents()).
-  // Backfilled by `trellis update` if missing so users who installed before the
+  // Backfilled by `trellis-lite update` if missing so users who installed before the
   // bundled agents existed pick them up. Edited files take the standard
   // modified-file prompt path.
   for (const [agentFile, content] of getAllAgents()) {
@@ -912,12 +827,6 @@ async function collectTemplateFiles(
       for (const [filePath, content] of platformFiles) {
         files.set(filePath, content);
       }
-      if (platformId === "copilot") {
-        files.set(
-          COPILOT_INSTRUCTIONS_PATH,
-          buildCopilotInstructionsTemplate(cwd),
-        );
-      }
     }
   }
 
@@ -929,8 +838,6 @@ async function collectTemplateFiles(
   if (platforms.has("codex")) {
     preserveCodexAgentModelKeys(cwd, files);
   }
-
-  preserveExistingClaudeStatusLine(cwd, files);
 
   for (const [filePath, content] of await collectRegistrySpecTemplates(cwd)) {
     files.set(filePath, content);
@@ -1018,13 +925,7 @@ function analyzeChanges(
         if (
           (storedHash && storedHash === currentHash) ||
           (!storedHash &&
-            isKnownUntrackedTemplate(relativePath, existingContent)) ||
-          (!storedHash &&
-            isSafeUntrackedCopilotInstructionsMerge(
-              relativePath,
-              existingContent,
-              newContent,
-            ))
+            isKnownUntrackedTemplate(relativePath, existingContent))
         ) {
           // Either the tracked hash matches, or this is a known pristine template
           // from before the path was hash-tracked. Safe to auto-update.
@@ -1050,7 +951,7 @@ function analyzeChanges(
  * Nothing else repairs these. `analyzeChanges` classifies such a file
  * `unchanged`, and the write-back draws only from `newFiles`,
  * `autoUpdateFiles` and overwritten `changedFiles` — so a poisoned or absent
- * entry beside a pristine file survives every subsequent `trellis update`,
+ * entry beside a pristine file survives every subsequent `trellis-lite update`,
  * however many times it is run. Identical template content across versions is
  * not what saves such an entry from going stale; it is precisely what freezes
  * it, because the file never leaves the `unchanged` bucket.
@@ -1061,8 +962,8 @@ function analyzeChanges(
  * A genuinely customized file differs from its template, lands in
  * `changedFiles`, and is never seen by this function.
  *
- * That also leaves the mixed-ownership paths — `AGENTS.md`,
- * `.github/copilot-instructions.md`, `.trellis/config.yaml` — free to differ
+ * That also leaves the mixed-ownership paths — `AGENTS.md` and
+ * `.trellis/config.yaml` — free to differ
  * from their recorded hash, which for them is the correct state: once the
  * repository has appended its own content they are no longer `unchanged`.
  */
@@ -2098,13 +1999,15 @@ export async function update(options: UpdateOptions): Promise<void> {
 
   // Check if Trellis is initialized
   if (!fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW))) {
-    console.log(chalk.red("Error: Trellis not initialized in this directory."));
-    console.log(chalk.gray("Run 'trellis init' first."));
+    console.log(
+      chalk.red("Error: Trellis Lite not initialized in this directory."),
+    );
+    console.log(chalk.gray("Run 'trellis-lite init' first."));
     return;
   }
 
-  console.log(chalk.cyan("\nTrellis Update"));
-  console.log(chalk.cyan("══════════════\n"));
+  console.log(chalk.cyan("\nTrellis Lite Update"));
+  console.log(chalk.cyan("═══════════════════\n"));
 
   // Set up proxy before any network calls (npm version check)
   setupProxy();
@@ -2137,7 +2040,7 @@ export async function update(options: UpdateOptions): Promise<void> {
         `⚠️  Your CLI (${cliVersion}) is behind npm (${latestNpmVersion}).`,
       ),
     );
-    console.log(chalk.yellow(`   Run: trellis upgrade\n`));
+    console.log(chalk.yellow(`   Run: trellis-lite upgrade\n`));
   }
 
   // Check for downgrade situation
@@ -2151,9 +2054,9 @@ export async function update(options: UpdateOptions): Promise<void> {
 
     if (!options.allowDowngrade) {
       console.log(chalk.gray("Solutions:"));
-      console.log(chalk.gray(`  1. Update your CLI: trellis upgrade`));
+      console.log(chalk.gray(`  1. Update your CLI: trellis-lite upgrade`));
       console.log(
-        chalk.gray(`  2. Force downgrade: trellis update --allow-downgrade\n`),
+        chalk.gray(`  2. Force downgrade: trellis-lite update --allow-downgrade\n`),
       );
       return;
     }
@@ -2169,7 +2072,6 @@ export async function update(options: UpdateOptions): Promise<void> {
 
   // Load template hashes for modification detection
   let hashes = loadHashes(cwd);
-  const zcodeConfigured = getConfiguredPlatforms(cwd).has("zcode");
   const isFirstHashTracking = Object.keys(hashes).length === 0;
 
   // Handle unknown version - skip regular migrations but safe-file-delete still runs
@@ -2177,7 +2079,7 @@ export async function update(options: UpdateOptions): Promise<void> {
   if (isUnknownVersion) {
     console.log(
       chalk.yellow(
-        "⚠️  No version file found. Skipping migrations — run trellis init to fix.",
+        "⚠️  No version file found. Skipping migrations — run trellis-lite init to fix.",
       ),
     );
     console.log(chalk.gray("   Template updates will still be applied."));
@@ -2202,7 +2104,7 @@ export async function update(options: UpdateOptions): Promise<void> {
 
   // Self-heal poisoned manifests: prune entries that no current platform
   // configurator owns. This silently removes user-owned paths that early
-  // buggy versions of `trellis init` over-hashed (e.g. .codex/sessions/*).
+  // buggy versions of `trellis-lite init` over-hashed (e.g. .codex/sessions/*).
   // Include codex in known-platforms when codexUpgradeNeeded so legacy Codex
   // markers under .agents/skills/ survive into the upgrade flow.
   {
@@ -2343,7 +2245,7 @@ export async function update(options: UpdateOptions): Promise<void> {
             ),
         );
         console.log("");
-        console.log(chalk.yellow(`  Run: trellis update --migrate`));
+        console.log(chalk.yellow(`  Run: trellis-lite update --migrate`));
         console.log("");
         console.log(
           chalk.gray(
@@ -2463,7 +2365,6 @@ export async function update(options: UpdateOptions): Promise<void> {
         );
       }
     }
-    if (zcodeConfigured) printZcodeSetupHint();
     return;
   }
 
@@ -2836,7 +2737,7 @@ export async function update(options: UpdateOptions): Promise<void> {
         prdContent += `**From Version**: ${projectVersion}\n`;
         prdContent += `**To Version**: ${cliVersion}\n`;
         prdContent += `**Assignee**: ${currentDeveloper}\n\n`;
-        prdContent += `## Status\n\n- [ ] Review migration guide\n- [ ] Update custom files\n- [ ] Run \`trellis update --migrate\`\n- [ ] Test workflows\n\n`;
+        prdContent += `## Status\n\n- [ ] Review migration guide\n- [ ] Update custom files\n- [ ] Run \`trellis-lite update --migrate\`\n- [ ] Test workflows\n\n`;
 
         for (const {
           version,
@@ -2874,14 +2775,12 @@ export async function update(options: UpdateOptions): Promise<void> {
         console.log("");
         console.log(
           chalk.gray(
-            "Use AI to help: Ask Claude/Cursor to read the task and fix your custom files.",
+            "Use AI to help: Ask Codex or OMP to read the task and fix your custom files.",
           ),
         );
       }
     }
   }
-
-  if (zcodeConfigured) printZcodeSetupHint();
 
   // Display breaking change warnings at the very end (so they don't scroll off screen)
   if (cliVsProject > 0 && projectVersion !== "unknown") {

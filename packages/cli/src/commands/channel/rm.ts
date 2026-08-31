@@ -1,8 +1,8 @@
 /**
- * `trellis channel rm <name>` — kill any live workers, then remove the
+ * `trellis-lite channel rm <name>` — kill any live workers, then remove the
  * channel directory under `~/.trellis/channels/`.
  *
- * `trellis channel prune [--all | --idle <duration> | --empty]` — bulk
+ * `trellis-lite channel prune [--all | --idle <duration> | --empty]` — bulk
  * cleanup matching criteria.
  */
 

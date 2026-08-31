@@ -15,7 +15,7 @@
  *
  * Step 2 of the supervisor refactor: this absorbs the 5 reviewer issues
  * (codex #1 crashed-without-done, #2 fire-and-forget shutdown, #3 spawn
- * after shutdown requested, #4 handshake error detail; claude M2 post-
+ * after shutdown requested, #4 handshake error detail; provider post-
  * spawn error ordering, L1 pre-spawn double-fire guard) into a single
  * state machine. The supervisor.ts orchestrator stays mostly mechanical.
  */

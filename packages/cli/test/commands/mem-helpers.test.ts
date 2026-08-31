@@ -1,8 +1,8 @@
 /**
- * Tier-1 unit tests for the `trellis mem` CLI-layer helpers.
+ * Tier-1 unit tests for the `trellis-lite mem` CLI-layer helpers.
  *
  * The reusable retrieval / search / cleaning primitives moved to
- * `@mindfoldhq/trellis-core/mem` and are covered by `packages/core/test/mem/*`.
+ * `trellis-lite-core/mem` and are covered by `packages/core/test/mem/*`.
  * What remains here is CLI-only: argv parsing, flag → core-filter translation,
  * and terminal formatting.
  */
@@ -39,12 +39,12 @@ describe("parseArgv", () => {
     const r = parseArgv([
       "list",
       "--platform",
-      "claude",
+      "codex",
       "--global",
       "--limit",
       "10",
     ]);
-    expect(r.flags.platform).toBe("claude");
+    expect(r.flags.platform).toBe("codex");
     expect(r.flags.global).toBe(true);
     expect(r.flags.limit).toBe("10");
   });
@@ -69,15 +69,15 @@ describe("buildFilter", () => {
     expect(f.until).toBeUndefined();
   });
 
-  it("accepts pi as a platform filter", () => {
-    const f = buildFilter({ platform: "pi", global: true });
-    expect(f.platform).toBe("pi");
+  it("accepts OMP as a platform filter", () => {
+    const f = buildFilter({ platform: "omp", global: true });
+    expect(f.platform).toBe("omp");
     expect(f.cwd).toBeUndefined();
   });
 
-  it("accepts zcode as a platform filter", () => {
-    const f = buildFilter({ platform: "zcode", global: true });
-    expect(f.platform).toBe("zcode");
+  it("accepts Codex as a platform filter", () => {
+    const f = buildFilter({ platform: "codex", global: true });
+    expect(f.platform).toBe("codex");
     expect(f.cwd).toBeUndefined();
   });
 

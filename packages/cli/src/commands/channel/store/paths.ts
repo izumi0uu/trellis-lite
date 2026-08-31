@@ -16,17 +16,15 @@ export function channelRoot(): string {
 }
 
 /**
- * Derive a per-project bucket name from an absolute cwd, mirroring
- * Claude Code's `~/.claude/projects/<sanitized-cwd>/` convention so
- * users who already work with that layout get a familiar mental model.
+ * Derive a stable per-project bucket name from an absolute cwd.
  *
  * The transform is irreversible (multiple cwds can collide if they
  * differ only in `/` vs `_` positions) but the collision risk in
- * practice is negligible — Claude Code accepts the same trade-off.
+ * practice is negligible.
  */
 export function projectKey(cwd: string): string {
   const abs = path.resolve(cwd);
-  // Match claude's rule: replace `/`, `_`, `\` with `-`. The leading
+  // Replace `/`, `_`, `\` with `-`. The leading
   // `-` (from the leading `/` on POSIX paths) is kept so you can spot
   // project buckets at a glance — they always start with `-`.
   //

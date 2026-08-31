@@ -1,6 +1,6 @@
 /**
  * Shared utilities for platform template modules.
- * Eliminates boilerplate across qoder/, codebuddy/, droid/, cursor/, gemini/, kiro/ index.ts files.
+ * Keeps the Codex and OMP template collectors consistent.
  */
 
 import { readdirSync, readFileSync } from "node:fs";

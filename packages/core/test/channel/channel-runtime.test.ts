@@ -21,7 +21,7 @@ import { setupChannelTmp, type TmpEnv } from "./setup.js";
 const fakeRuntime: WorkerRuntime = {
   start: async (input) => ({
     workerId: input.workerId,
-    provider: "claude",
+    provider: "codex",
     pid: 4242,
     startedAt: new Date().toISOString(),
   }),
@@ -253,7 +253,7 @@ describe("spawnWorker / interrupt APIs", () => {
         cwd: env.projectDir,
         by: "main",
         workerId: "w",
-        provider: "claude",
+        provider: "codex",
         systemPrompt: "x",
         inboxPolicy: "broadcastAndExplicit",
       },

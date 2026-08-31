@@ -5,44 +5,17 @@
  */
 
 import {
-  claudeExtractDialogue,
-  claudeListSessions,
-  claudeSearch,
-  collectClaudeTurnsAndEvents,
-} from "./adapters/claude.js";
-import {
   codexExtractDialogue,
   codexListSessions,
   codexSearch,
   collectCodexTurnsAndEvents,
 } from "./adapters/codex.js";
 import {
-  collectGrokTurnsAndEvents,
-  grokExtractDialogue,
-  grokListSessions,
-  grokSearch,
-} from "./adapters/grok.js";
-import {
-  opencodeExtractDialogue,
-  opencodeListSessions,
-  opencodeSearch,
-  prepareOpencodeSessionStore,
-  releaseOpencodeSessionStore,
-} from "./adapters/opencode.js";
-import {
-  collectPiTurnsAndEvents,
-  piExtractDialogue,
-  piListSessions,
-  piSearch,
-} from "./adapters/pi.js";
-import {
-  collectZcodeTurnsAndEvents,
-  prepareZcodeSessionStore,
-  releaseZcodeSessionStore,
-  zcodeExtractDialogue,
-  zcodeListSessions,
-  zcodeSearch,
-} from "./adapters/zcode.js";
+  collectOmpTurnsAndEvents,
+  ompExtractDialogue,
+  ompListSessions,
+  ompSearch,
+} from "./adapters/omp.js";
 import { buildBrainstormWindows } from "./phase.js";
 import { relevanceScore, searchInDialogue } from "./search.js";
 import type {
@@ -93,21 +66,13 @@ export function resolveFilter(filter?: MemFilter): MemFilter {
 /** Fan out to every in-scope platform, merge by recency, cap at `f.limit`. */
 export function listAll(
   f: MemFilter,
-  warnings: MemWarning[] = [],
+  _warnings: MemWarning[] = [],
 ): MemSessionInfo[] {
   const all: MemSessionInfo[] = [];
-  if (f.platform === "all" || f.platform === "claude")
-    all.push(...claudeListSessions(f));
   if (f.platform === "all" || f.platform === "codex")
     all.push(...codexListSessions(f));
-  if (f.platform === "all" || f.platform === "grok")
-    all.push(...grokListSessions(f));
-  if (f.platform === "all" || f.platform === "opencode")
-    all.push(...opencodeListSessions(f, warnings));
-  if (f.platform === "all" || f.platform === "pi")
-    all.push(...piListSessions(f));
-  if (f.platform === "all" || f.platform === "zcode")
-    all.push(...zcodeListSessions(f, warnings));
+  if (f.platform === "all" || f.platform === "omp")
+    all.push(...ompListSessions(f));
   all.sort((a, b) =>
     (b.updated ?? b.created ?? "").localeCompare(a.updated ?? a.created ?? ""),
   );
@@ -119,39 +84,23 @@ function extractDialogue(
   warnings: MemWarning[] = [],
 ): DialogueTurn[] {
   switch (s.platform) {
-    case "claude":
-      return claudeExtractDialogue(s);
     case "codex":
       return codexExtractDialogue(s, warnings);
-    case "grok":
-      return grokExtractDialogue(s, warnings);
-    case "opencode":
-      return opencodeExtractDialogue(s, warnings);
-    case "pi":
-      return piExtractDialogue(s);
-    case "zcode":
-      return zcodeExtractDialogue(s, warnings);
+    case "omp":
+      return ompExtractDialogue(s);
   }
 }
 
 function searchSession(
   s: MemSessionInfo,
   kw: string,
-  warnings: MemWarning[] = [],
+  _warnings: MemWarning[] = [],
 ): SearchHit {
   switch (s.platform) {
-    case "claude":
-      return claudeSearch(s, kw);
     case "codex":
       return codexSearch(s, kw);
-    case "grok":
-      return grokSearch(s, kw);
-    case "opencode":
-      return opencodeSearch(s, kw, warnings);
-    case "pi":
-      return piSearch(s, kw);
-    case "zcode":
-      return zcodeSearch(s, kw, warnings);
+    case "omp":
+      return ompSearch(s, kw);
   }
 }
 
@@ -163,23 +112,14 @@ function collectTurnsAndEvents(
   events: TaskPyEvent[];
 } {
   switch (s.platform) {
-    case "claude":
-      return collectClaudeTurnsAndEvents(s);
     case "codex":
       return collectCodexTurnsAndEvents(s, warnings);
-    case "grok":
-      return collectGrokTurnsAndEvents(s, warnings);
-    case "opencode":
-      return { turns: opencodeExtractDialogue(s, warnings), events: [] };
-    case "pi":
-      return collectPiTurnsAndEvents(s);
-    case "zcode":
-      return collectZcodeTurnsAndEvents(s, warnings);
+    case "omp":
+      return collectOmpTurnsAndEvents(s);
   }
 }
 
-/** Build a parent → descendants index (transitively flattened) for OpenCode
- * sub-agent chains. Other platforms have no native `parent_id`. */
+/** Build a parent → descendants index for providers that expose parent ids. */
 function buildChildIndex(
   sessions: readonly MemSessionInfo[],
 ): Map<string, MemSessionInfo[]> {
@@ -236,22 +176,13 @@ interface PhaseSlice {
   warnings: MemWarning[];
 }
 
-/** Slice cleaned dialogue by phase. Claude / Codex / Grok / Pi / ZCode have
- * native boundary detection; OpenCode degrades to "all turns + warning". */
+/** Slice cleaned dialogue by phase using task.py create/start boundaries. */
 function sliceMemPhase(
   s: MemSessionInfo,
   phase: MemPhase,
   warnings: MemWarning[] = [],
 ): PhaseSlice {
-  if (phase === "all" || s.platform === "opencode") {
-    if (phase !== "all" && s.platform === "opencode") {
-      warnings.push({
-        code: "opencode-phase-unsupported",
-        message:
-          `--phase ${phase} on platform=opencode is not yet supported; ` +
-          `returning full dialogue.`,
-      });
-    }
+  if (phase === "all") {
     const turns = extractDialogue(s, warnings);
     return {
       groups: [{ label: null, turns }],
@@ -318,8 +249,7 @@ function sliceMemPhase(
 
 // ---------- public API ----------
 
-/** List session metadata across Claude / Codex / Grok / OpenCode / Pi / ZCode,
- * sorted by recency and capped at the filter's `limit` (default 50). */
+/** List Codex and OMP session metadata, sorted by recency and capped. */
 export function listMemSessions(
   options?: ListMemSessionsOptions,
 ): MemSessionInfo[] {
@@ -351,33 +281,18 @@ export function searchMemSessions(
     candidateIds.has(s.parent_id);
 
   const matches: MemSearchMatch[] = [];
-  const zcodeCandidate = candidates.find((s) => s.platform === "zcode");
-  if (zcodeCandidate) {
-    prepareZcodeSessionStore(zcodeCandidate.filePath, warnings);
-  }
-  try {
-    const opencodeCandidate = candidates.find(
-      (s) => s.platform === "opencode",
-    );
-    if (opencodeCandidate) {
-      prepareOpencodeSessionStore(opencodeCandidate.filePath, warnings);
-    }
-    for (const s of candidates) {
-      if (isAbsorbedChild(s)) continue;
-      const hit = includeChildren
-        ? searchSessionWithChildren(s, kw, childIndex, warnings)
-        : searchSession(s, kw, warnings);
-      if (hit.count === 0) continue;
-      matches.push({
-        session: s,
-        hit,
-        score: relevanceScore(hit),
-        descendantsMerged: childIndex.get(s.id)?.length ?? 0,
-      });
-    }
-  } finally {
-    releaseZcodeSessionStore();
-    releaseOpencodeSessionStore();
+  for (const s of candidates) {
+    if (isAbsorbedChild(s)) continue;
+    const hit = includeChildren
+      ? searchSessionWithChildren(s, kw, childIndex, warnings)
+      : searchSession(s, kw, warnings);
+    if (hit.count === 0) continue;
+    matches.push({
+      session: s,
+      hit,
+      score: relevanceScore(hit),
+      descendantsMerged: childIndex.get(s.id)?.length ?? 0,
+    });
   }
   matches.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;

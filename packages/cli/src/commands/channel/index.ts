@@ -28,7 +28,7 @@ import { channelTitleClear, channelTitleSet } from "./title.js";
 import { runSupervisor } from "./supervisor.js";
 import { channelWait, parseDuration } from "./wait.js";
 import { parseCsv } from "./store/schema.js";
-import { parseInboxPolicy } from "@mindfoldhq/trellis-core/channel";
+import { parseInboxPolicy } from "trellis-lite-core/channel";
 
 function parseNonNegativeInteger(value: string): number {
   if (!/^\d+$/.test(value)) {
@@ -275,7 +275,7 @@ export function registerChannelCommand(program: Command): void {
   channel
     .command("spawn <name>")
     .description(
-      "Register a worker (claude/codex) into the channel — the worker stays idle until the first `channel send --to <worker>` arrives",
+      "Register a Codex worker into the channel — the worker stays idle until the first `channel send --to <worker>` arrives",
     )
     .option("--scope <scope>", "channel scope: project | global")
     .option(
@@ -284,7 +284,7 @@ export function registerChannelCommand(program: Command): void {
     )
     .option(
       "--provider <provider>",
-      "worker provider: claude | codex (overrides agent)",
+      "worker provider: codex (overrides agent)",
     )
     .option(
       "--as <name>",
@@ -400,7 +400,7 @@ export function registerChannelCommand(program: Command): void {
     )
     .option(
       "--provider <provider>",
-      "worker provider: claude | codex (overrides agent)",
+      "worker provider: codex (overrides agent)",
     )
     .option("--as <name>", "worker name (default: agent name if --agent set)")
     .option("--cwd <path>", "worker working directory")
@@ -928,22 +928,11 @@ export function registerChannelCommand(program: Command): void {
       }
     });
 
-  // Dev-only: feed a recorded stream-json / wire trace through the matching
-  // adapter and print the resulting channel events. Used during adapter
-  // development to verify against real-CLI fixtures.
+  // Dev-only: feed a recorded Codex wire trace through the parser.
   channel
-    .command("__parse-trace <adapter> <file>")
+    .command("__parse-trace <file>")
     .description(
       "[dev] Run a recorded trace through the parser and print events",
     )
-    .action((adapter: string, file: string) => {
-      if (!isProvider(adapter)) {
-        console.error(
-          chalk.red("Error:"),
-          `unknown adapter '${adapter}' (registered: ${listProviders().join(", ")})`,
-        );
-        process.exit(1);
-      }
-      parseTrace(adapter, file);
-    });
+    .action((file: string) => parseTrace(file));
 }

@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug in Trellis CLI
+description: Report a bug in Trellis Lite CLI
 labels: ["bug", "pkg:cli"]
 body:
   - type: textarea
@@ -20,7 +20,7 @@ body:
     id: version
     attributes:
       label: Trellis Version
-      description: Output of `trellis --version`
+      description: Output of `trellis-lite --version`
     validations:
       required: true
   - type: input

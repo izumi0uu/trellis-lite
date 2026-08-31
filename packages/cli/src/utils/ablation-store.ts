@@ -504,7 +504,7 @@ export function stageAblationTransaction(
   }
   if (lstatIfPresent(paths.transactionDir)) {
     throw new Error(
-      "An ablation transaction already exists for this project. Run `trellis restore` first.",
+      "An ablation transaction already exists for this project. Run `trellis-lite restore` first.",
     );
   }
   ensurePrivateDirectory(paths.stateRoot);

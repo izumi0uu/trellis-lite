@@ -34,7 +34,7 @@ describe("getInstallPath", () => {
 
   it("returns command path for 'command' type", () => {
     const result = getInstallPath("/project", "command");
-    expect(result).toBe(path.join("/project", ".claude/commands"));
+    expect(result).toBe(path.join("/project", ".omp/commands"));
   });
 
   it("returns project root for 'full' type", () => {

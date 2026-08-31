@@ -63,23 +63,23 @@ describe("pruneOrphanManifestKeys", () => {
   });
 
   it("keeps entries that any configured platform's collectTemplates owns", () => {
-    // Claude configurator owns .claude/settings.json — should survive prune
+    // Codex configurator owns .codex/hooks.json — should survive prune
     // even though it's in the manifest pre-prune.
     const hashes = {
-      ".claude/settings.json": "claude-hash",
-      ".claude/sessions/user.jsonl": "user-hash",
+      ".codex/hooks.json": "codex-hash",
+      ".codex/sessions/user.jsonl": "user-hash",
     };
     saveHashes(tmpDir, hashes);
 
     const { pruned, hashes: kept } = pruneOrphanManifestKeys(
       tmpDir,
-      ["claude-code"],
+      ["codex"],
       hashes,
     );
 
-    expect(pruned).toEqual([".claude/sessions/user.jsonl"]);
-    expect(kept).toHaveProperty(".claude/settings.json");
-    expect(kept).not.toHaveProperty(".claude/sessions/user.jsonl");
+    expect(pruned).toEqual([".codex/sessions/user.jsonl"]);
+    expect(kept).toHaveProperty(".codex/hooks.json");
+    expect(kept).not.toHaveProperty(".codex/sessions/user.jsonl");
   });
 
   it("keeps root-level AGENTS.md when it has Trellis managed-block markers", () => {

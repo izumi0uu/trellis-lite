@@ -28,7 +28,7 @@ describe("reduceWorkerRegistry", () => {
     reset();
     const reg = reduceWorkerRegistry([
       ev("create", { by: "main" }),
-      ev("spawned", { by: "main", as: "w1", provider: "claude" }),
+      ev("spawned", { by: "main", as: "w1", provider: "codex" }),
     ]);
     expect(reg.workers).toHaveLength(1);
     const w = reg.workers[0];
@@ -36,7 +36,7 @@ describe("reduceWorkerRegistry", () => {
     expect(w.lifecycle).toBe("running");
     expect(w.terminal).toBe(false);
     expect(w.activity).toBe("idle");
-    expect(w.provider).toBe("claude");
+    expect(w.provider).toBe("codex");
     expect(w.inboxPolicy).toBe("explicitOnly");
     expect(w.startedBy).toBe("main");
   });
@@ -249,7 +249,7 @@ describe("reduceWorkerRegistry", () => {
   it("sets idleSince on spawn and clears it mid-turn", () => {
     reset();
     const reg = reduceWorkerRegistry([
-      ev("spawned", { as: "w", provider: "claude" }), // seq 1
+      ev("spawned", { as: "w", provider: "codex" }), // seq 1
     ]);
     expect(reg.workers[0].idleSince).toBe(
       "2026-05-14T00:00:01.000Z",

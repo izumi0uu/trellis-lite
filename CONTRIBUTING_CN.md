@@ -9,7 +9,7 @@
 提交 Bug 前，请先查看 [已有 Issues](https://github.com/mindfold-ai/Trellis/issues) 避免重复。
 
 报告 Bug 时请包含：
-- Trellis 版本 (`trellis --version`)
+- Trellis 版本 (`trellis-lite --version`)
 - Node.js 版本 (`node --version`)
 - 操作系统
 - 复现步骤
@@ -81,24 +81,19 @@ pnpm typecheck   # TypeScript 类型检查
 ## 项目结构
 
 ```
-Trellis/
-├── src/                    # TypeScript 源代码
-│   ├── cli/                # CLI 入口
-│   ├── commands/           # CLI 命令 (init, update)
-│   ├── configurators/      # 模板应用逻辑
-│   ├── templates/          # 安装到用户项目的模板 ←
-│   └── utils/              # 工具函数
-├── .claude/                # Claude Code 配置（项目自用）←
-│   ├── agents/             # Agent 定义
-│   ├── commands/           # 斜杠命令
-│   └── hooks/              # Python Hook 脚本
-├── .trellis/               # Trellis 工作流（项目自用）←
-│   ├── scripts/            # Bash 脚本
-│   └── spec/               # Spec 文件模板
-└── docs/                   # 文档
+trellis-lite/
+├── packages/
+│   ├── cli/                # CLI、configurators、Codex/OMP 模板
+│   └── core/               # Task、channel 与 memory 基础能力
+├── .codex/                 # Codex 项目集成
+├── .omp/                   # OMP 项目集成
+├── .agents/skills/         # Codex 与 OMP 共享 skills
+└── .trellis/               # Workflow、scripts、specs、tasks 与 journals
 ```
 
-> **重要：** 修改 `.claude/`、`.trellis/` 或 `.cursor/` 时，请检查是否需要同步更新 `src/templates/`。项目使用自己的配置文件，但模板才是安装到用户项目的内容。
+> **重要：** 项目中的生成文件必须和
+> `packages/cli/src/templates/` 下的源模板保持同步。当前只有 Codex 和
+> OMP 两个活动平台。
 
 ## 提交规范
 

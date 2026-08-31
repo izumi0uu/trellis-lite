@@ -245,7 +245,7 @@ function resolveActiveTaskStatus(
 
    // Same jail the jsonl-referenced files already go through below. `task.py`
    // now refuses to store a ref that leaves the project, but a session file
-   // written before that fix can still hold one, and `trellis update` does not
+   // written before that fix can still hold one, and `trellis-lite update` does not
    // rewrite session files — so a poisoned pointer outlives the upgrade that
    // closed the writer.
    const taskDir = resolveProjectFile(projectRoot, currentTask, resolveTrustedRoots(projectRoot));
@@ -268,7 +268,7 @@ function resolveActiveTaskStatus(
 }
 
 // ---------------------------------------------------------------------------
-// Session context — spawns get_context.py default mode (same as Claude hook)
+// Session context — spawns get_context.py default mode for the OMP extension.
 // ---------------------------------------------------------------------------
 
 const SESSION_CONTEXT_TIMEOUT_MS = 5000;
@@ -301,12 +301,91 @@ function buildSessionContext(projectRoot: string, contextKey: string | null): st
 // ---------------------------------------------------------------------------
 
 type AgentType = "trellis-implement" | "trellis-check" | "trellis-research" | null;
+type LiteChangeMode = "P0" | "P1" | "P2" | "P3";
+type LiteVerificationLevel = "V0" | "V1" | "V2" | "V3";
+type LiteUiVerificationLevel = "U0" | "U1" | "U2" | "U3";
+type LiteUiDriver = "ego-lite" | "playwright" | "cypress" | "selenium" | "project-suite";
+
+interface LiteProfile {
+   status: "selected" | "unselected" | "invalid";
+   change_mode: LiteChangeMode | null;
+   verification_level: LiteVerificationLevel | null;
+   ui_verification_level: LiteUiVerificationLevel | null;
+   checker: "off" | "report";
+   ui_driver: LiteUiDriver;
+   allowed_paths: string[];
+   forbidden_paths: string[];
+   scope_locked: boolean;
+   max_verification_passes: number;
+   max_ui_verification_passes: number;
+}
+
+const CHECKER_ALLOWED_TOOLS = new Set(["read", "grep", "glob", "find", "search", "ast_grep", "lsp", "yield"]);
+const LITE_CHANGE_MODES = new Set<LiteChangeMode>(["P0", "P1", "P2", "P3"]);
+const LITE_VERIFICATION_LEVELS = new Set<LiteVerificationLevel>(["V0", "V1", "V2", "V3"]);
+const LITE_UI_LEVELS = new Set<LiteUiVerificationLevel>(["U0", "U1", "U2", "U3"]);
+const LITE_UI_DRIVERS = new Set<LiteUiDriver>(["ego-lite", "playwright", "cypress", "selenium", "project-suite"]);
 
 function taskContextJsonlNames(agentType?: AgentType): string[] {
    if (agentType === "trellis-implement") return ["implement.jsonl"];
    if (agentType === "trellis-check") return ["check.jsonl"];
    if (agentType === "trellis-research") return [];
    return ["implement.jsonl", "check.jsonl"];
+}
+
+function boundedStringArray(value: unknown): string[] {
+   if (!Array.isArray(value)) return [];
+   return value
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim().replaceAll("\\", "/"))
+      .filter(Boolean)
+      .slice(0, 64);
+}
+
+function liteProfileFromTask(taskData: Record<string, unknown>): LiteProfile {
+   const raw = taskData.lite;
+   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return {
+         status: "unselected", change_mode: null, verification_level: null,
+         ui_verification_level: null, checker: "off", ui_driver: "ego-lite",
+         allowed_paths: [], forbidden_paths: [], scope_locked: false,
+         max_verification_passes: 0, max_ui_verification_passes: 0,
+      };
+   }
+   const profile = raw as Record<string, unknown>;
+   const changeMode = typeof profile.change_mode === "string" && LITE_CHANGE_MODES.has(profile.change_mode as LiteChangeMode)
+      ? profile.change_mode as LiteChangeMode : null;
+   const verificationLevel = typeof profile.verification_level === "string" && LITE_VERIFICATION_LEVELS.has(profile.verification_level as LiteVerificationLevel)
+      ? profile.verification_level as LiteVerificationLevel : null;
+   const uiLevel = typeof profile.ui_verification_level === "string" && LITE_UI_LEVELS.has(profile.ui_verification_level as LiteUiVerificationLevel)
+      ? profile.ui_verification_level as LiteUiVerificationLevel : null;
+   const uiDriver = typeof profile.ui_driver === "string" && LITE_UI_DRIVERS.has(profile.ui_driver as LiteUiDriver)
+      ? profile.ui_driver as LiteUiDriver : "ego-lite";
+   const defaultPasses = verificationLevel === "V0" ? 0 : verificationLevel === "V1" ? 1 : verificationLevel === "V2" ? 3 : 8;
+   const defaultUiPasses = uiLevel === "U0" ? 0 : uiLevel === "U1" || uiLevel === "U2" ? 1 : 3;
+   const requestedPasses = typeof profile.max_verification_passes === "number" && Number.isInteger(profile.max_verification_passes)
+      ? Math.max(0, Math.min(8, profile.max_verification_passes)) : defaultPasses;
+   const requestedUiPasses = typeof profile.max_ui_verification_passes === "number" && Number.isInteger(profile.max_ui_verification_passes)
+      ? Math.max(0, Math.min(3, profile.max_ui_verification_passes)) : defaultUiPasses;
+   const valid = changeMode !== null
+      && verificationLevel !== null
+      && uiLevel !== null
+      && profile.scope_locked === true
+      && Array.isArray(profile.allowed_paths)
+      && Array.isArray(profile.forbidden_paths);
+   return {
+      status: valid ? "selected" : "invalid",
+      change_mode: changeMode,
+      verification_level: verificationLevel,
+      ui_verification_level: uiLevel,
+      checker: profile.checker === "report" ? "report" : "off",
+      ui_driver: uiDriver,
+      allowed_paths: boundedStringArray(profile.allowed_paths),
+      forbidden_paths: boundedStringArray(profile.forbidden_paths),
+      scope_locked: profile.scope_locked === true,
+      max_verification_passes: requestedPasses,
+      max_ui_verification_passes: requestedUiPasses,
+   };
 }
 
 function taskContextInputPaths(projectRoot: string, taskDir: string, agentType?: AgentType): string[] {
@@ -884,6 +963,92 @@ function detectAgentType(): AgentType {
    return null;
 }
 
+function activeLiteState(projectRoot: string, contextKey: string | null): { declared: boolean; profile: LiteProfile | null } {
+   const active = resolveActiveTaskStatus(projectRoot, contextKey);
+   if (!active.taskDir) return { declared: false, profile: null };
+   try {
+      const taskData = JSON.parse(readFileSync(join(active.taskDir, "task.json"), "utf-8")) as Record<string, unknown>;
+      const declared = Object.prototype.hasOwnProperty.call(taskData, "lite");
+      const profile = liteProfileFromTask(taskData);
+      return { declared, profile: profile.status === "selected" ? profile : null };
+   } catch {
+      return { declared: false, profile: null };
+   }
+}
+
+function globMatches(pattern: string, value: string): boolean {
+   let expression = "^";
+   const normalized = pattern.trim().replaceAll("\\", "/").replace(/^\.\//, "");
+   for (let index = 0; index < normalized.length; index += 1) {
+      const char = normalized[index]!;
+      if (char === "*" && normalized[index + 1] === "*") {
+         expression += ".*";
+         index += 1;
+      } else if (char === "*") expression += "[^/]*";
+      else if (char === "?") expression += "[^/]";
+      else expression += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+   }
+   try { return new RegExp(`${expression}$`).test(value); } catch { return false; }
+}
+
+const TOOL_PATH_KEYS = new Set(["path", "file", "filepath", "file_path", "filename", "target", "targets", "files"]);
+
+function collectToolPaths(value: unknown, keyHint = "", output: string[] = [], depth = 0): string[] {
+   if (depth > 5 || output.length >= 64) return output;
+   if (typeof value === "string") {
+      if (TOOL_PATH_KEYS.has(keyHint.toLowerCase())) output.push(value);
+      return output;
+   }
+   if (Array.isArray(value)) {
+      for (const item of value) collectToolPaths(item, keyHint, output, depth + 1);
+      return output;
+   }
+   if (!value || typeof value !== "object") return output;
+   for (const [key, child] of Object.entries(value)) collectToolPaths(child, key, output, depth + 1);
+   return output;
+}
+
+function profilePathViolation(projectRoot: string, profile: LiteProfile, input: unknown): string | null {
+   if (!profile.scope_locked || (profile.allowed_paths.length === 0 && profile.forbidden_paths.length === 0)) return null;
+   const root = resolve(projectRoot);
+   for (const rawPath of collectToolPaths(input)) {
+      const lexical = isAbsolute(rawPath) ? resolve(rawPath) : resolve(root, rawPath);
+      if (!isInsideRoot(root, lexical)) return `path escapes project root: ${rawPath}`;
+      const relativePath = relative(root, lexical).replaceAll("\\", "/");
+      if (relativePath === ".trellis" || relativePath.startsWith(".trellis/")) continue;
+      if (profile.forbidden_paths.some((pattern) => globMatches(pattern, relativePath))) return `path is forbidden by Lite profile: ${relativePath}`;
+      if (profile.allowed_paths.length > 0 && !profile.allowed_paths.some((pattern) => globMatches(pattern, relativePath))) return `path is outside Lite profile allowlist: ${relativePath}`;
+   }
+   return null;
+}
+
+function toolCommand(input: unknown): string {
+   if (!input || typeof input !== "object") return "";
+   const record = input as Record<string, unknown>;
+   for (const key of ["command", "cmd", "script"]) if (typeof record[key] === "string") return record[key] as string;
+   return "";
+}
+
+function uiDriverForCommand(command: string): LiteUiDriver | null {
+   if (/\bego-browser\b/i.test(command)) return "ego-lite";
+   if (/\bplaywright\b/i.test(command)) return "playwright";
+   if (/\bcypress\b/i.test(command)) return "cypress";
+   if (/\bselenium\b|\bwebdriver\b/i.test(command)) return "selenium";
+   if (/\b(?:e2e|browser[-_: ]?test|test:ui|ui[-_: ]?test)\b/i.test(command)) return "project-suite";
+   return null;
+}
+
+function verificationCommand(command: string): boolean {
+   return /\b(?:test|tests|pytest|jest|vitest|mocha|lint|eslint|ruff|flake8|pylint|stylelint|typecheck|type-check|tsc|pyright|basedpyright|mypy|build|compile|pack|bundle|integration|smoke)\b/i.test(command);
+}
+
+function consumeBudget(calls: Map<string, number>, key: string, maximum: number, label: string): string | null {
+   const used = calls.get(key) ?? 0;
+   if (used >= maximum) return `${label} budget exhausted; ask the user before running another verification pass`;
+   calls.set(key, used + 1);
+   return null;
+}
+
 interface TaskContextCache {
    projectRoot: string;
    taskDir: string;
@@ -907,6 +1072,8 @@ export default function(pi: ExtensionAPI): void {
    // compaction has occurred since last injection.
    let lastCompactionTs = 0;
    let lastInjectionTs = 0;
+   const verificationCalls = new Map<string, number>();
+   const uiVerificationCalls = new Map<string, number>();
 
    const rememberContextKey = (ctx?: { sessionManager?: { getSessionId?: () => string | undefined; getSessionFile?: () => string | undefined } }): string | null => {
       const key = deriveContextKey(ctx);
@@ -1071,13 +1238,65 @@ export default function(pi: ExtensionAPI): void {
       };
    });
 
-   // OMP passes Bash event.input through to the tool execution parameters, so
-   // inject the session key through the shell-agnostic env field. An explicit
-   // per-call value wins over the derived key.
    pi.on("tool_call", (event, ctx) => {
-      if (event.toolName !== "bash") return;
       const contextKey = rememberContextKey(ctx);
-      if (!contextKey) return;
+      if (agentType === "trellis-check" && !CHECKER_ALLOWED_TOOLS.has(event.toolName)) {
+         return { block: true, reason: `Trellis Lite checker blocked non-inspection tool: ${event.toolName}` };
+      }
+
+      if (projectRoot && ["write", "edit", "apply_patch"].includes(event.toolName)) {
+         const state = activeLiteState(projectRoot, contextKey);
+         if (state.declared && !state.profile) {
+            return { block: true, reason: "Trellis Lite profile is invalid; ask the user to select P/V/U/checker levels before editing" };
+         }
+         if (state.profile) {
+            const violation = profilePathViolation(projectRoot, state.profile, event.input);
+            if (violation) return { block: true, reason: `Trellis Lite ${state.profile.change_mode} boundary: ${violation}` };
+         }
+      }
+
+      if (projectRoot && event.toolName === "bash") {
+         const state = activeLiteState(projectRoot, contextKey);
+         const profile = state.profile;
+         const command = toolCommand(event.input);
+         if (profile && contextKey && command) {
+            const requestedUiDriver = uiDriverForCommand(command);
+            if (requestedUiDriver) {
+               if (profile.ui_verification_level === "U0") {
+                  return { block: true, reason: "Trellis Lite U0 forbids browser/UI verification, including driver availability checks" };
+               }
+               if (requestedUiDriver !== profile.ui_driver) {
+                  return {
+                     block: true,
+                     reason: `Trellis Lite ${profile.ui_verification_level} selected ${profile.ui_driver}; ${requestedUiDriver} requires explicit user authorization`,
+                  };
+               }
+               if (profile.ui_driver === "ego-lite") {
+                  const ego = spawnSync("ego-browser", ["--version"], { encoding: "utf-8", timeout: 3000, windowsHide: true });
+                  if (ego.error || ego.status !== 0) {
+                     return { block: true, reason: "Ego Lite is not available. Tell the user immediately; do not install it or fall back to Playwright, Cypress, or Selenium." };
+                  }
+               }
+               const violation = consumeBudget(
+                  uiVerificationCalls,
+                  `${contextKey}:${profile.ui_verification_level}:${profile.ui_driver}`,
+                  profile.max_ui_verification_passes,
+                  profile.ui_verification_level ?? "UI verification",
+               );
+               if (violation) return { block: true, reason: `Trellis Lite UI boundary: ${violation}` };
+            } else if (verificationCommand(command)) {
+               const violation = consumeBudget(
+                  verificationCalls,
+                  `${contextKey}:${profile.verification_level}`,
+                  profile.max_verification_passes,
+                  profile.verification_level ?? "verification",
+               );
+               if (violation) return { block: true, reason: `Trellis Lite code verification boundary: ${violation}` };
+            }
+         }
+      }
+
+      if (event.toolName !== "bash" || !contextKey) return;
       const input = event.input as { env?: Record<string, string> };
       input.env = {
          TRELLIS_CONTEXT_ID: contextKey,

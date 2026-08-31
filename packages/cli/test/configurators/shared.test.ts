@@ -518,16 +518,6 @@ describe("resolvePlaceholdersNeutral", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolveSkillsNeutral / resolveAllAsSkillsNeutral", () => {
-  it("resolveSkillsNeutral produces byte-identical output for Codex and Gemini", () => {
-    const codexSkills = resolveSkillsNeutral(AI_TOOLS.codex.templateContext);
-    const geminiSkills = resolveSkillsNeutral(AI_TOOLS.gemini.templateContext);
-    expect(codexSkills.length).toBe(geminiSkills.length);
-    for (let i = 0; i < codexSkills.length; i++) {
-      expect(codexSkills[i].name).toBe(geminiSkills[i].name);
-      expect(codexSkills[i].content).toBe(geminiSkills[i].content);
-    }
-  });
-
   it("resolveSkillsNeutral renders CMD_REF without platform-specific prefix", () => {
     // The neutral output must not contain platform-prefixed tokens for any
     // command that CMD_REF references in the shared skills (Codex `$name`,

@@ -1,7 +1,7 @@
 /**
  * Integration tests for the uninstall uncommitted-data guard (audit 🔴-7).
  *
- * `trellis uninstall` deletes the whole .trellis/ tree — including
+ * `trellis-lite uninstall` deletes the whole .trellis/ tree — including
  * user-authored specs, task PRDs, and journals — with no backup. When those
  * hold uncommitted work, a scripted `--yes` run must fail closed rather than
  * silently destroy them.

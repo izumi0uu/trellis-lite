@@ -1,6 +1,6 @@
-# `trellis mem` CLI Reference
+# `trellis-lite mem` CLI Reference
 
-Full flag reference for the five subcommands. Pin this as the authoritative source — `trellis mem help` prints the same content at runtime, so anything here that drifts is a bug.
+Full flag reference for the five subcommands. Pin this as the authoritative source — `trellis-lite mem help` prints the same content at runtime, so anything here that drifts is a bug.
 
 ## Subcommands
 
@@ -16,7 +16,7 @@ Full flag reference for the five subcommands. Pin this as the authoritative sour
 
 | Flag                                          | Subcommands       | Meaning                                                                                                                                                    |
 | --------------------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--platform claude\|codex\|opencode\|pi\|all` | all               | Default `all`. OpenCode adapter is currently a stub on `0.6.0-beta.*` — see "Caveats" below.                                                               |
+| `--platform codex\|omp\|all`                   | all               | Default `all`; searches the two platforms supported by Trellis Lite.                                                                                       |
 | `--since YYYY-MM-DD`                          | list / search     | Inclusive lower date bound.                                                                                                                                |
 | `--until YYYY-MM-DD`                          | list / search     | Inclusive upper date bound.                                                                                                                                |
 | `--global`                                    | list / search     | Include sessions from every project on this machine. Default is the current project `cwd`.                                                                 |
@@ -27,25 +27,24 @@ Full flag reference for the five subcommands. Pin this as the authoritative sour
 | `--turns N`                                   | context           | Number of hit turns to return. Default `3`.                                                                                                                |
 | `--around N`                                  | context           | Surrounding turns to include per hit. Default `1`.                                                                                                         |
 | `--max-chars N`                               | context           | Total character budget. Default `6000` (~1500 tokens).                                                                                                     |
-| `--include-children`                          | search / context  | Merge OpenCode sub-agent sessions into their parent session.                                                                                               |
 | `--json`                                      | all               | Emit machine-parseable JSON instead of human-readable output.                                                                                              |
 
 ## Common one-liners
 
 ```bash
 # What past sessions discussed "deadlock" anywhere on this machine?
-trellis mem search "deadlock" --global --limit 20
+trellis-lite mem search "deadlock" --global --limit 20
 
 # Inside a specific session, surface the top 5 turns that mention "lock contention"
 # plus 2 turns of surrounding context.
-trellis mem context 5842592d --grep "lock contention" --turns 5 --around 2
+trellis-lite mem context 5842592d --grep "lock contention" --turns 5 --around 2
 
 # Recover the brainstorm window for a session — useful when continuing a task
 # the user started a week ago.
-trellis mem extract 5842592d --phase brainstorm
+trellis-lite mem extract 5842592d --phase brainstorm
 
 # List every project this machine has Trellis sessions for, with counts.
-trellis mem projects
+trellis-lite mem projects
 ```
 
 ## Output shapes
@@ -55,11 +54,11 @@ trellis mem projects
 
 ## Caveats
 
-- **OpenCode adapter is a stub on `0.6.0-beta.*`.** When `--platform` resolves to OpenCode (or `all` and OpenCode would be included), `mem` prints a one-line "reader unavailable" notice and continues with the other platforms. Don't promise OpenCode coverage in your reply until the adapter ships.
 - **`--phase` slicing depends on `task.py create` / `task.py start` invocations appearing in the recorded bash calls of the session.** Sessions where the user ran `task.py` from a different terminal — outside the recorded AI loop — will not have phase boundaries. `--phase all` is the safe fallback.
-- **`mem` indexes platform JSONL files directly.** If the user has cleared their Claude / Codex / Pi session storage, `mem` cannot recover what is no longer on disk.
+- **`mem` indexes local session files directly.** If the user has cleared Codex or OMP session storage, `mem` cannot recover what is no longer on disk.
+- **OMP uses Pi-compatible storage.** Seeing `~/.pi/agent/sessions/` in diagnostics identifies OMP's storage format, not a third supported platform.
 - **`mem` is read-only.** No remote sync, no edits to platform JSONL. Any write you do based on `mem` findings is your own follow-up call into the editing tools available to you.
 
 ## When you need more than this reference
 
-Run `trellis mem help` in the user's shell. The runtime help is authoritative and will be ahead of this reference during fast-moving beta releases.
+Run `trellis-lite mem help` in the user's shell. The runtime help is authoritative and will be ahead of this reference during fast-moving beta releases.

@@ -206,23 +206,7 @@ def _report_write_failure(path: Path) -> None:
 # Codex is checked separately because explicit inline mode does not consume
 # JSONL. Kilo / Antigravity / Devin are NOT in this list either: they load
 # specs through skills instead of JSONL.
-_SUBAGENT_CONFIG_DIRS: tuple[str, ...] = (
-    ".claude",
-    ".cursor",
-    ".kiro",
-    ".gemini",
-    ".opencode",
-    ".qoder",
-    ".codebuddy",
-    ".factory",   # Factory Droid
-    ".github/copilot",
-    ".pi",        # Pi Agent
-    ".trae",      # Trae IDE
-    ".omp",       # Oh My Pi
-    ".zcode",     # ZCode
-    ".grok",      # Grok Build
-    ".kimi-code", # Kimi Code
-)
+_SUBAGENT_CONFIG_DIRS: tuple[str, ...] = (".omp",)
 _CODEX_CONFIG_DIR = ".codex"
 
 

@@ -67,7 +67,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--platform",
-        help="Platform name for --mode phase, e.g. cursor, claude-code. Filters platform-tagged blocks.",
+        help="Platform name for --mode phase: codex or omp. Filters platform-tagged blocks.",
     )
 
     args = parser.parse_args()

@@ -11,7 +11,7 @@
  *   │   ├── common/           # Shared utilities (Python)
  *   │   └── *.py              # Main scripts (Python)
  *   ├── agents/                # Channel runtime agent definitions
- *   │   └── *.md               # Loaded by `trellis channel spawn --agent <name>`
+ *   │   └── *.md               # Loaded by `trellis-lite channel spawn --agent <name>`
  *   ├── scripts-shell-archive/ # Archived shell scripts (for reference)
  *   ├── workflow.md           # Workflow guide
  *   ├── config.yaml            # Trellis configuration
@@ -41,7 +41,6 @@ export const commonGitContext = readTemplate("scripts/common/git_context.py");
 export const commonTaskQueue = readTemplate("scripts/common/task_queue.py");
 export const commonTaskUtils = readTemplate("scripts/common/task_utils.py");
 export const commonActiveTask = readTemplate("scripts/common/active_task.py");
-export const commonCliAdapter = readTemplate("scripts/common/cli_adapter.py");
 export const commonConfig = readTemplate("scripts/common/config.py");
 export const commonIo = readTemplate("scripts/common/io.py");
 export const commonLog = readTemplate("scripts/common/log.py");
@@ -79,8 +78,8 @@ export const gitattributesTemplate = readTemplate("gitattributes.txt");
 
 // Channel runtime agent definitions (loaded by
 // `packages/cli/src/commands/channel/agent-loader.ts` from `.trellis/agents/`).
-// These are platform-agnostic Trellis runtime files dispatched at `trellis init`
-// and refreshed by `trellis update`.
+// These are platform-agnostic Trellis runtime files dispatched at `trellis-lite init`
+// and refreshed by `trellis-lite update`.
 export const implementAgentTemplate = readTemplate("agents/implement.md");
 export const checkAgentTemplate = readTemplate("agents/check.md");
 
@@ -101,7 +100,6 @@ export function getAllScripts(): Map<string, string> {
   scripts.set("common/task_queue.py", commonTaskQueue);
   scripts.set("common/task_utils.py", commonTaskUtils);
   scripts.set("common/active_task.py", commonActiveTask);
-  scripts.set("common/cli_adapter.py", commonCliAdapter);
   scripts.set("common/config.py", commonConfig);
   scripts.set("common/io.py", commonIo);
   scripts.set("common/log.py", commonLog);
@@ -130,8 +128,8 @@ export function getAllScripts(): Map<string, string> {
  * Get all channel runtime agent definitions as a map of relative path
  * (under `.trellis/agents/`) to content.
  *
- * Consumed by `trellis init` (to dispatch on first install) and by
- * `trellis update` (to backfill missing files and surface conflicts on edited
+ * Consumed by `trellis-lite init` (to dispatch on first install) and by
+ * `trellis-lite update` (to backfill missing files and surface conflicts on edited
  * ones via the standard hash machinery).
  */
 export function getAllAgents(): Map<string, string> {

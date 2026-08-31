@@ -25,7 +25,7 @@ const TEMPLATE_REPO = "gh:mindfold-ai/marketplace";
 const INSTALL_PATHS: Record<string, string> = {
   spec: ".trellis/spec",
   skill: ".agents/skills",
-  command: ".claude/commands",
+  command: ".omp/commands",
   full: ".", // Entire project root
 };
 

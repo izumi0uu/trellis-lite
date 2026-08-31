@@ -15,6 +15,7 @@ Usage:
     python3 task.py set-base-branch <dir> <branch>  # Set PR target branch
     python3 task.py set-scope <dir> <scope>     # Set scope for PR title
     python3 task.py set-meta <dir> <key> <value>  # Set a task metadata key
+    python3 task.py set-lite-profile <dir> [options]  # Set bounded execution policy
     python3 task.py rename <dir> <new-slug> [--dry-run]  # Rename task + references
     python3 task.py archive <task-dir> [--skip-branch-validation]  # Archive completed task
     python3 task.py list                        # List active tasks
@@ -79,6 +80,105 @@ from common.task_context import (
 # =============================================================================
 # Command: start / finish
 # =============================================================================
+
+CHANGE_MODES = ("P0", "P1", "P2", "P3")
+VERIFICATION_LEVELS = ("V0", "V1", "V2", "V3")
+UI_VERIFICATION_LEVELS = ("U0", "U1", "U2", "U3")
+CHECKER_MODES = ("off", "report")
+UI_DRIVERS = ("ego-lite", "playwright", "cypress", "selenium", "project-suite")
+DEFAULT_VERIFICATION_PASSES = {"V0": 0, "V1": 1, "V2": 3, "V3": 8}
+DEFAULT_UI_VERIFICATION_PASSES = {"U0": 0, "U1": 1, "U2": 1, "U3": 3}
+
+
+def _lite_profile_error(data: dict) -> str | None:
+    """Return a user-facing validation error for ``task.json.lite``."""
+    profile = data.get("lite")
+    if not isinstance(profile, dict):
+        return "missing task.json.lite execution profile"
+
+    expected = (
+        ("change_mode", CHANGE_MODES),
+        ("verification_level", VERIFICATION_LEVELS),
+        ("ui_verification_level", UI_VERIFICATION_LEVELS),
+        ("checker", CHECKER_MODES),
+        ("ui_driver", UI_DRIVERS),
+    )
+    for field, choices in expected:
+        value = profile.get(field)
+        if value not in choices:
+            return f"lite.{field} must be one of: {', '.join(choices)}"
+
+    for field in ("allowed_paths", "forbidden_paths"):
+        values = profile.get(field)
+        if not isinstance(values, list) or any(not isinstance(item, str) or not item.strip() for item in values):
+            return f"lite.{field} must be an array of non-empty path patterns"
+
+    if profile.get("scope_locked") is not True:
+        return "lite.scope_locked must be true"
+    if not isinstance(profile.get("selected_by"), str) or not profile["selected_by"].strip():
+        return "lite.selected_by must be a non-empty string"
+
+    for field in ("max_verification_passes", "max_ui_verification_passes"):
+        value = profile.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return f"lite.{field} must be a non-negative integer"
+
+    verification_cap = DEFAULT_VERIFICATION_PASSES[profile["verification_level"]]
+    if profile["max_verification_passes"] > verification_cap:
+        return f"lite.max_verification_passes cannot exceed {verification_cap} for {profile['verification_level']}"
+    ui_cap = DEFAULT_UI_VERIFICATION_PASSES[profile["ui_verification_level"]]
+    if profile["max_ui_verification_passes"] > ui_cap:
+        return f"lite.max_ui_verification_passes cannot exceed {ui_cap} for {profile['ui_verification_level']}"
+    return None
+
+
+def cmd_set_lite_profile(args: argparse.Namespace) -> int:
+    """Write the user-selected bounded execution profile to an existing task."""
+    repo_root = get_repo_root()
+    task_dir = resolve_task_dir(args.dir, repo_root)
+    if task_dir is None:
+        return 1
+    task_json_path = task_dir / FILE_TASK_JSON
+    data, reason = read_json_checked(task_json_path)
+    if data is None:
+        problem, hint = describe_json_read_failure(task_json_path, reason)
+        print(colored(f"Error: {problem}", Colors.RED), file=sys.stderr)
+        print(hint, file=sys.stderr)
+        return 1
+
+    profile = {
+        "change_mode": args.change_mode,
+        "verification_level": args.verification_level,
+        "ui_verification_level": args.ui_verification_level,
+        "checker": args.checker,
+        "ui_driver": args.ui_driver,
+        "allowed_paths": args.allowed_path or [],
+        "forbidden_paths": args.forbidden_path or [],
+        "selected_by": args.selected_by,
+        "scope_locked": True,
+        "max_verification_passes": (
+            args.max_verification_passes
+            if args.max_verification_passes is not None
+            else DEFAULT_VERIFICATION_PASSES[args.verification_level]
+        ),
+        "max_ui_verification_passes": (
+            args.max_ui_verification_passes
+            if args.max_ui_verification_passes is not None
+            else DEFAULT_UI_VERIFICATION_PASSES[args.ui_verification_level]
+        ),
+    }
+    candidate = {**data, "lite": profile}
+    error = _lite_profile_error(candidate)
+    if error:
+        print(colored(f"Error: {error}", Colors.RED), file=sys.stderr)
+        return 1
+    if not write_json(task_json_path, candidate):
+        print(colored(f"Error: Failed to write {task_json_path}", Colors.RED), file=sys.stderr)
+        return 1
+
+    print(colored("✓ Lite execution profile set", Colors.GREEN))
+    print(json.dumps(profile, indent=2, ensure_ascii=False))
+    return 0
 
 def _record_start_state(
     task_json_path: Path,
@@ -232,10 +332,30 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     task_json_path = full_path / FILE_TASK_JSON
 
+    task_data, reason = read_json_checked(task_json_path)
+    if task_data is None:
+        problem, hint = describe_json_read_failure(task_json_path, reason)
+        print(colored(f"Error: {problem}", Colors.RED), file=sys.stderr)
+        print(hint, file=sys.stderr)
+        return 1
+    # Historical in-progress tasks remain resumable. A fresh phase transition
+    # fails closed until the user has selected the bounded Lite policy.
+    if task_data.get("status") == "planning":
+        profile_error = _lite_profile_error(task_data)
+        if profile_error:
+            print(colored(f"Error: {profile_error}", Colors.RED), file=sys.stderr)
+            print(
+                "Run `python3 .trellis/scripts/task.py set-lite-profile <task> "
+                "--change-mode P0 --verification-level V1 "
+                "--ui-verification-level U0` after asking the user.",
+                file=sys.stderr,
+            )
+            return 1
+
     if not resolve_context_key():
         # Degraded mode: no session identity available.
-        # Hook didn't inject TRELLIS_CONTEXT_ID (common on Windows + Claude Code,
-        # --continue resume path, fork distribution, hooks disabled, etc.). Skip
+        # The host did not expose a usable context id (for example hooks are
+        # disabled or a resumed session lacks injected state). Skip
         # per-session pointer write; AI continues based on conversation context.
         print(colored(
             "ℹ Session identity not available; active-task pointer not persisted "
@@ -541,6 +661,7 @@ Usage:
   python3 task.py set-base-branch <dir> <branch>     Set PR target branch
   python3 task.py set-scope <dir> <scope>            Set scope for PR title
   python3 task.py set-meta <dir> <key> <value>       Set/overwrite a task metadata key
+  python3 task.py set-lite-profile <dir> [options]   Set P/V/U/checker execution limits
   python3 task.py rename <dir> <new-slug>            Rename task, identity fields and references
   python3 task.py archive <task-dir>                 Archive completed task
   python3 task.py add-subtask <parent> <child>       Link child task to parent
@@ -575,6 +696,7 @@ Examples:
   python3 task.py create "Add login feature" --description "Email + password sign-in" --meta linear=ENG-123 --meta epic=auth
   python3 task.py create "Child task" --description "Session cookie handling" --slug child --parent .trellis/tasks/01-21-parent
   python3 task.py add-context <dir> implement .trellis/spec/cli/backend/auth.md "Auth guidelines"
+  python3 task.py set-lite-profile <dir> --change-mode P0 --verification-level V1 --ui-verification-level U0
   python3 task.py set-branch <dir> task/add-login
   python3 task.py start .trellis/tasks/01-21-add-login
   python3 task.py current --source
@@ -721,6 +843,23 @@ def main() -> int:
     p_setmeta.add_argument("key", help="Metadata key")
     p_setmeta.add_argument("value", help="Metadata value")
 
+    # set-lite-profile
+    p_lite = subparsers.add_parser(
+        "set-lite-profile",
+        help="Record user-selected change, code verification, and UI verification limits",
+    )
+    p_lite.add_argument("dir", help="Task directory")
+    p_lite.add_argument("--change-mode", choices=CHANGE_MODES, required=True)
+    p_lite.add_argument("--verification-level", choices=VERIFICATION_LEVELS, required=True)
+    p_lite.add_argument("--ui-verification-level", choices=UI_VERIFICATION_LEVELS, required=True)
+    p_lite.add_argument("--checker", choices=CHECKER_MODES, default="off")
+    p_lite.add_argument("--ui-driver", choices=UI_DRIVERS, default="ego-lite")
+    p_lite.add_argument("--allow", dest="allowed_path", action="append", default=[])
+    p_lite.add_argument("--forbid", dest="forbidden_path", action="append", default=[])
+    p_lite.add_argument("--selected-by", default="user")
+    p_lite.add_argument("--max-verification-passes", type=int)
+    p_lite.add_argument("--max-ui-verification-passes", type=int)
+
     # rename
     p_rename = subparsers.add_parser("rename", help="Rename task and its references")
     p_rename.add_argument("name", help="Task directory or name")
@@ -782,6 +921,7 @@ def main() -> int:
         "set-base-branch": cmd_set_base_branch,
         "set-scope": cmd_set_scope,
         "set-meta": cmd_set_meta,
+        "set-lite-profile": cmd_set_lite_profile,
         "rename": cmd_rename,
         "archive": cmd_archive,
         "add-subtask": cmd_add_subtask,

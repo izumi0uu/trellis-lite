@@ -12,11 +12,6 @@ import path from "node:path";
 import { DIR_NAMES, FILE_NAMES } from "../constants/paths.js";
 import { ALL_MANAGED_DIRS } from "../configurators/index.js";
 import {
-  COPILOT_INSTRUCTIONS_BLOCK_END,
-  COPILOT_INSTRUCTIONS_BLOCK_START,
-  COPILOT_INSTRUCTIONS_PATH,
-} from "../templates/copilot/index.js";
-import {
   scrubCodexConfigToml,
   scrubHooksJson,
   scrubManagedMarkdownBlock,
@@ -29,6 +24,14 @@ import {
   TRELLIS_BLOCK_END,
   TRELLIS_BLOCK_START,
 } from "./managed-paths.js";
+
+// Legacy-only ownership markers. They let uninstall safely scrub a manifest
+// created by an older upstream Trellis release without shipping that platform.
+const COPILOT_INSTRUCTIONS_PATH = ".github/copilot-instructions.md";
+const COPILOT_INSTRUCTIONS_BLOCK_START =
+  "<!-- TRELLIS:COPILOT-GUIDANCE:START -->";
+const COPILOT_INSTRUCTIONS_BLOCK_END =
+  "<!-- TRELLIS:COPILOT-GUIDANCE:END -->";
 
 export interface StructuredFileSpec {
   /** Manifest path (POSIX). */

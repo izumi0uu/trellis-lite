@@ -1,13 +1,13 @@
 {
-  "name": "@mindfoldhq/trellis",
-  "version": "0.6.16",
-  "description": "AI capabilities grow like ivy — Trellis provides the structure to guide them along a disciplined path",
+  "name": "trellis-lite",
+  "version": "1.0.0",
+  "description": "Trellis Lite: a bounded Codex and OMP workflow with explicit P/V/U verification budgets",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "trellis": "./bin/trellis.js",
-    "tl": "./bin/trellis.js"
+    "trellis-lite": "./bin/trellis-lite.js",
+    "tll": "./bin/trellis-lite.js"
   },
   "publishConfig": {
     "access": "public"
@@ -40,19 +40,18 @@
   "keywords": [
     "ai",
     "workflow",
-    "cursor",
-    "claude",
-    "iflow",
+    "codex",
+    "omp",
     "cli",
     "developer-tools",
     "agent",
     "memory",
     "trellis"
   ],
-  "author": "Mindfold LLC",
+  "author": "izumi0uu",
   "license": "AGPL-3.0-only",
   "dependencies": {
-    "@mindfoldhq/trellis-core": "workspace:*",
+    "trellis-lite-core": "workspace:*",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "figlet": "^1.9.4",
@@ -85,6 +84,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/mindfold-ai/trellis.git"
+    "url": "https://github.com/izumi0uu/trellis-lite.git"
   }
 }

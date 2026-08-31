@@ -7,8 +7,8 @@
  *   ---
  *   name: architect
  *   description: System architect ...
- *   provider: claude       # claude | codex; used as default --provider
- *   model: claude-opus-4-7 # CLI-specific model id; optional
+ *   provider: codex        # used as default --provider
+ *   model: gpt-5           # CLI-specific model id; optional
  *   labels: [design]       # optional metadata
  *   ---
  *
@@ -24,7 +24,7 @@ import path from "node:path";
 export interface AgentDefinition {
   name: string;
   description?: string;
-  provider?: "claude" | "codex";
+  provider?: "codex";
   model?: string;
   labels?: string[];
   systemPrompt: string;
@@ -121,10 +121,10 @@ export function loadAgent(
 
 function normalizeProvider(
   v: string | undefined,
-): "claude" | "codex" | undefined {
+): "codex" | undefined {
   if (!v) return undefined;
   const t = v.trim().toLowerCase();
-  if (t === "claude" || t === "codex") return t;
+  if (t === "codex") return t;
   return undefined;
 }
 

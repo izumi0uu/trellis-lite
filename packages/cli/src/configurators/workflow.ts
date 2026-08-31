@@ -85,7 +85,7 @@ const JOURNAL_MERGE_UNION_PATTERN = /journal-\*\.md\s+merge=union/;
  *
  * - No `.gitattributes` yet: write the bundled template directly.
  * - Existing file that already has a `journal-*.md merge=union` rule (user's
- *   own or from a previous `trellis init`/`update`): no-op, avoids duplicates.
+ *   own or from a previous `trellis-lite init`/`update`): no-op, avoids duplicates.
  * - Existing file without that rule: append the bundled template content.
  *
  * Intentionally does NOT go through the standard `writeFile` conflict-prompt
@@ -163,10 +163,10 @@ export async function createWorkflowStructure(
   ensureGitattributes(cwd);
 
   // Dispatch channel runtime agent definitions. These are platform-agnostic
-  // Trellis runtime files consumed by `trellis channel spawn --agent <name>`
+  // Trellis runtime files consumed by `trellis-lite channel spawn --agent <name>`
   // through `packages/cli/src/commands/channel/agent-loader.ts`. They are
   // dispatched on every init regardless of selected workflow because the user
-  // can switch to a channel-driven workflow at any time via `trellis workflow
+  // can switch to a channel-driven workflow at any time via `trellis-lite workflow
   // --template`.
   ensureDir(path.join(cwd, PATHS.AGENTS));
   for (const [agentFile, content] of getAllAgents()) {

@@ -1,8 +1,8 @@
 /**
- * Supervisor process: owns a single worker (claude or codex) and bridges
+ * Supervisor process: owns a Codex worker and bridges
  * worker ↔ channel events.jsonl.
  *
- * Run as: `trellis channel __supervisor <channel> <worker> <config-path>`
+ * Run as: `trellis-lite channel __supervisor <channel> <worker> <config-path>`
  *
  * Three concurrent loops:
  *   1. stdout reader  — parse worker stdout → adapter → append events
@@ -20,9 +20,8 @@ import type { Readable, Writable } from "node:stream";
 import {
   DEFAULT_INBOX_POLICY,
   type InboxPolicy,
-} from "@mindfoldhq/trellis-core/channel";
+} from "trellis-lite-core/channel";
 
-import { shouldUseSystemPromptFile } from "./adapters/claude.js";
 import type { CodexSandboxMode } from "./adapters/codex.js";
 import { getAdapter, type Provider } from "./adapters/index.js";
 import { appendEvent } from "./store/events.js";
@@ -41,10 +40,7 @@ export interface SupervisorConfig {
   provider: Provider;
   cwd: string;
   /** Combined worker system prompt: channel protocol prefix + agent body.
-   *  Injected via Claude `--append-system-prompt(-file)` or Codex
-   *  `developerInstructions`. The supervisor also persists it to
-   *  `<worker>.system-prompt.md` and exposes the path as
-   *  `view.systemPromptFile` so adapters can avoid OS argv-length limits.
+   *  Injected through Codex `developerInstructions`.
    *  No "initial user prompt" — the worker stays idle until the first
    *  inbox `send --to <worker>` arrives. */
   systemPrompt: string;
@@ -125,7 +121,7 @@ export async function finalizeSupervisorExit(args: {
 /**
  * Resolve the real launch target for npm `.cmd` shims on Windows.
  *
- * @param provider CLI basename for the provider, such as `codex` or `claude`.
+ * @param provider CLI basename (`codex`).
  * @param cwd Worker launch directory, used to check local `node_modules/.bin` first.
  * @returns Command and prefix arguments that can be passed directly to `spawn()`.
  */
@@ -173,7 +169,7 @@ export function resolveProviderPath(
 }
 
 /**
- * Entry point invoked by `trellis channel __supervisor <channel> <worker> <config>`.
+ * Entry point invoked by `trellis-lite channel __supervisor <channel> <worker> <config>`.
  */
 export async function runSupervisor(
   channelName: string,
@@ -182,7 +178,7 @@ export async function runSupervisor(
 ): Promise<void> {
   const config = readConfig(configPath);
 
-  // Self-pid file lets `trellis channel kill` find us.
+  // Self-pid file lets `trellis-lite channel kill` find us.
   const project = process.env.TRELLIS_CHANNEL_PROJECT;
   fs.writeFileSync(
     workerFile(channelName, workerName, "pid", project),
@@ -192,29 +188,10 @@ export async function runSupervisor(
   // ── adapter selection ──
   const adapter = getAdapter(config.provider);
   const adapterCtx = adapter.createCtx();
-  // Persist an oversized system prompt to the worker dir and hand adapters a
-  // file path. Inlining a large prompt (agent body + injected --file/--jsonl
-  // context) on the worker command line breaks spawn(): Windows CreateProcess
-  // caps the command line at 32,767 chars and fails with a silent-to-the-user
-  // ENAMETOOLONG. Prompts within the inline budget stay on the argv flag so
-  // Claude Code installs older than v2.0.34 (no --append-system-prompt-file)
-  // keep working exactly as before; adapters that do support a file-based
-  // prompt flag (claude: --append-system-prompt-file) prefer it.
-  let systemPromptFile: string | undefined;
-  if (shouldUseSystemPromptFile(config.systemPrompt)) {
-    systemPromptFile = workerFile(
-      channelName,
-      workerName,
-      "system-prompt.md",
-      project,
-    );
-    fs.writeFileSync(systemPromptFile, config.systemPrompt);
-  }
   const view = {
     resume: config.resume,
     model: config.model,
     systemPrompt: config.systemPrompt,
-    ...(systemPromptFile ? { systemPromptFile } : {}),
     cwd: config.cwd,
     sandbox: config.sandbox,
   };
@@ -346,7 +323,7 @@ export async function runSupervisor(
       })();
       return;
     }
-    // Post-spawn error (worker already running). Claude M2 fix: await
+    // Post-spawn error (worker already running): await
     // the `error` append BEFORE requesting shutdown so `killed` can't
     // land first in events.jsonl.
     //

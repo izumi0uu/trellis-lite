@@ -16,7 +16,7 @@ import { setupChannelTmp, type TmpEnv } from "./setup.js";
 const fakeRuntime: WorkerRuntime = {
   start: async (input) => ({
     workerId: input.workerId,
-    provider: "claude",
+    provider: "codex",
     pid: 4242,
     startedAt: new Date().toISOString(),
   }),
@@ -249,7 +249,7 @@ describe("readWorkerInbox", () => {
       kind: "spawned",
       by: "main",
       as: "w",
-      provider: "claude",
+      provider: "codex",
       pid: 1,
     });
     await sendMessage({ channel: "c", by: "main", text: "broadcast" });

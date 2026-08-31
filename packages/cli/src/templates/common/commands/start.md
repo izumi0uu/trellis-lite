@@ -1,59 +1,10 @@
-# Start Session
+# Start Trellis Lite
 
-Initialize a Trellis-managed development session. This platform has no session-start hook, so manually load the equivalent compact context by following these steps.
+1. Run `{{PYTHON_CMD}} ./.trellis/scripts/get_context.py`.
+2. If there is no durable implementation task, either work directly for a tiny request or create one when the user wants Trellis.
+3. For a planning task, inspect the repository and prepare the minimum useful PRD.
+4. Ask only for missing P/V/U/checker choices. One V level covers frontend and backend; U is independent.
+5. Record the choices with `task.py set-lite-profile` before `task.py start`.
+6. For an in-progress task, read `task.json.lite` and continue within those limits.
 
----
-
-## Step 1: Current state
-Identity, git status, current task, active tasks, journal location.
-
-```bash
-{{PYTHON_CMD}} ./.trellis/scripts/get_context.py
-```
-
-If this output includes a line beginning `Trellis update available:`, copy the full line verbatim when summarizing session context. Do not shorten operational command hints.
-
-## Step 2: Workflow overview
-Compact Phase Index, request triage rules, planning artifact contract, and the step-detail command.
-
-```bash
-{{PYTHON_CMD}} ./.trellis/scripts/get_context.py --mode phase
-```
-
-Full guide in `.trellis/workflow.md` (read on demand).
-
-## Step 3: Guideline indexes
-Discover packages + spec layers, then read each relevant index file.
-
-```bash
-{{PYTHON_CMD}} ./.trellis/scripts/get_context.py --mode packages
-cat .trellis/spec/guides/index.md
-cat .trellis/spec/<package>/<layer>/index.md   # for each relevant layer
-```
-
-Index files list the specific guideline docs to read when you actually start coding.
-
-## Step 4: Decide next action
-From Step 1 you know the current task and status. Check the task directory:
-
-- **Active task status `planning` + no `prd.md`** → Phase 1.1. Load the `trellis-brainstorm` skill.
-- **Active task status `planning` + `prd.md` exists** → stay in Phase 1. Lightweight tasks can be PRD-only; complex tasks need `design.md` + `implement.md`. Load the relevant Phase 1 step detail before `task.py start`.
-- **Active task status `in_progress`** → Phase 2 step 2.1. Load the step detail:
-  ```bash
-  {{PYTHON_CMD}} ./.trellis/scripts/get_context.py --mode phase --step 2.1 --platform {{CLI_FLAG}}
-  ```
-- **No active task** → classify first. For simple conversation / small task, ask only whether this turn should create a Trellis task. For complex work, ask whether you may create a Trellis task and enter planning. If the user says no, skip Trellis for this session.
-
----
-
-## Skill routing (quick reference)
-
-| User intent | Skill |
-|---|---|
-| New feature / unclear requirements | `trellis-brainstorm` |
-| About to write code | `trellis-before-dev` |
-| Done coding / quality check | `trellis-check` |
-| Stuck / fixed same bug multiple times | `trellis-break-loop` |
-| Learned something worth capturing | `trellis-update-spec` |
-
-Full rules + anti-rationalization table in `.trellis/workflow.md`.
+Full policy: `.trellis/workflow.md`.

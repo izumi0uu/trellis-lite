@@ -55,7 +55,7 @@ max_journal_lines: 2000
 #-------------------------------------------------------------------------------
 
 # Declare packages for monorepo projects.
-# Trellis auto-detects workspaces during `trellis init`, but you can also
+# Trellis auto-detects workspaces during `trellis-lite init`, but you can also
 # configure them manually here.
 #
 # packages:
@@ -87,7 +87,7 @@ default_package: cli
 #-------------------------------------------------------------------------------
 # Channel worker OOM guard
 #-------------------------------------------------------------------------------
-# Default safeguards for `trellis channel spawn` workers. The guard runs
+# Default safeguards for `trellis-lite channel spawn` workers. The guard runs
 # at spawn time (cleans expired idle workers, then enforces the live-worker
 # budget) and inside each supervisor (self-terminates a worker that stays
 # continuously idle past `idle_timeout`).
@@ -132,7 +132,7 @@ channel:
 # research sub-agent work, edit `model` / `model_reasoning_effort` directly
 # on the generated `.codex/agents/trellis-*.toml` files (see the commented
 # hint lines in those files) — there is no config.yaml knob for this,
-# `trellis update` preserves your edits across regeneration.
+# `trellis-lite update` preserves your edits across regeneration.
 #
 # codex:
 #   dispatch_mode: auto  # or "inline"; legacy alias: "sub-agent"

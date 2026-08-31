@@ -46,7 +46,7 @@ from .paths import (
 # Helpers
 # =============================================================================
 
-_PACKAGE_NAME = "@mindfoldhq/trellis"
+_PACKAGE_NAME = "trellis-lite"
 _UPDATE_CHECK_TIMEOUT_SECONDS = 1.0
 _VERSION_RE = re.compile(
     r"^\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?\s*$"
@@ -460,9 +460,8 @@ def _mark_update_check_attempted(
 def get_update_hint(repo_root: Path, context_key: str | None = None) -> str | None:
     """Return the "update available" line for this session, at most once.
 
-    Public because the SessionStart hook imports it: the text-mode CLI path
-    (`get_context.py`) used to be the only caller, so hook-driven platforms —
-    Claude Code included — never saw the reminder at all.
+    Public because the Codex SessionStart hook imports it in addition to the
+    text-mode CLI path (`get_context.py`).
     """
     marker_path = _update_marker_path(repo_root, context_key)
     if marker_path.exists():
@@ -483,7 +482,7 @@ def get_update_hint(repo_root: Path, context_key: str | None = None) -> str | No
 
     return (
         f"Trellis update available: {current_version} -> {latest_version}, "
-        "run trellis update"
+        "run trellis-lite update"
     )
 
 

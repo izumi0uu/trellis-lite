@@ -27,6 +27,10 @@ const SHARED_HOOKS = path.resolve(
   __dirname,
   "../../src/templates/shared-hooks",
 );
+const CODEX_HOOKS = path.resolve(
+  __dirname,
+  "../../src/templates/codex/hooks",
+);
 
 function hasPython(): boolean {
   try {
@@ -281,7 +285,7 @@ describeFn("no-trellis skip keyword (issue #427)", () => {
     it("session-start.py still emits context when the prompt contains the skip keyword", () => {
       const r = spawnSync(
         "python3",
-        [path.join(SHARED_HOOKS, "session-start.py")],
+        [path.join(CODEX_HOOKS, "session-start.py")],
         {
           cwd: tmp,
           encoding: "utf-8",
@@ -291,7 +295,7 @@ describeFn("no-trellis skip keyword (issue #427)", () => {
             session_id: "test-session",
             prompt: "no-trellis",
           }),
-          env: { ...process.env, CLAUDE_PROJECT_DIR: tmp },
+          env: process.env,
         },
       );
       expect(r.status).toBe(0);

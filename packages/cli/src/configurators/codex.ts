@@ -143,12 +143,9 @@ export function preserveCodexAgentModelKeys(
 }
 
 /**
- * The Codex file set — written at init and diffed by `trellis update`.
+ * The Codex file set — written at init and diffed by `trellis-lite update`.
  * - .agents/skills/ — shared skills from common source, rendered with the
- *   neutral placeholder resolver so the auto-triggered skill templates from
- *   `common/skills/` are byte-identical regardless of which platform writes
- *   them (Gemini CLI 0.40+ and Pi target `.agents/skills/` too, and
- *   last-writer-wins is only safe when both writers produce identical output).
+ *   neutral placeholder resolver so the generated skill content stays stable.
  * - .codex/agents/ — custom agent profiles. Native Codex SubagentStart hooks
  *   push role-specific context; each profile also carries a marker-gated pull
  *   fallback for untrusted or unavailable hooks, so no unconditional prelude.
@@ -190,7 +187,7 @@ export function collectCodexTemplates(): Map<string, string> {
  */
 export async function configureCodex(cwd: string): Promise<void> {
   // Build map → post-process map → write. Rendered up front so the preserved
-  // user keys are grafted onto exactly the bytes `trellis update` compares
+  // user keys are grafted onto exactly the bytes `trellis-lite update` compares
   // against — update.ts runs preserveCodexAgentModelKeys over its already
   // rendered map too, and the two must agree. writeTemplateMap re-renders,
   // which is a no-op (replacePythonCommandLiterals is idempotent).

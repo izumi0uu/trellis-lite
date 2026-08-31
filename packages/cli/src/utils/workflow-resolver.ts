@@ -1,7 +1,7 @@
 /**
  * Workflow template resolver.
  *
- * Centralizes how `trellis init --workflow` and `trellis workflow` discover and
+ * Centralizes how `trellis-lite init --workflow` and `trellis-lite workflow` discover and
  * fetch workflow.md content. Reuses `template-fetcher` helpers for registry
  * parsing, index probing, and git/http transport. The `native` workflow is a
  * virtual entry resolved directly from the bundled `workflowMdTemplate` to
@@ -32,7 +32,7 @@ import {
  * The id used to refer to the bundled native workflow.
  *
  * Treated as Trellis-managed for hash-tracking: when this id is selected by
- * `init --workflow` or `trellis workflow`, `.trellis/workflow.md` stays in
+ * `init --workflow` or `trellis-lite workflow`, `.trellis/workflow.md` stays in
  * `.template-hashes.json`. Any other id is user-managed local workflow and
  * must be removed from the hash file (the durable-state contract in
  * design.md "Durable-state contract").

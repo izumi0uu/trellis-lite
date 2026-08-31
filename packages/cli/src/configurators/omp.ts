@@ -10,7 +10,7 @@ import {
 import { getAllAgents, getExtensionTemplate } from "../templates/omp/index.js";
 
 /**
- * The OMP file set — written at init and diffed by `trellis update`.
+ * The OMP file set — written at init and diffed by `trellis-lite update`.
  * OMP has no settings.json — the native provider auto-discovers all capabilities.
  */
 export function collectOmpTemplates(): Map<string, string> {

@@ -295,7 +295,7 @@ describe("scanLiveWorkers + enforceSpawnBudget (integration)", () => {
     await createChannel("c1", { by: "main" });
     await appendEvent(
       "c1",
-      { kind: "spawned", by: "main", as: "w1", provider: "claude" },
+      { kind: "spawned", by: "main", as: "w1", provider: "codex" },
       env.projectKey,
     );
     writeLivePid(env.channelsRoot, env.projectKey, "c1", "w1");
@@ -314,7 +314,7 @@ describe("scanLiveWorkers + enforceSpawnBudget (integration)", () => {
     await createChannel("c-ok", { by: "main" });
     await appendEvent(
       "c-ok",
-      { kind: "spawned", by: "main", as: "w1", provider: "claude" },
+      { kind: "spawned", by: "main", as: "w1", provider: "codex" },
       env.projectKey,
     );
     writeLivePid(env.channelsRoot, env.projectKey, "c-ok", "w1");
@@ -561,7 +561,7 @@ describe("scanLiveWorkers + enforceSpawnBudget (integration)", () => {
     });
     expect(msg).toContain("Live worker budget exhausted");
     expect(msg).toContain("channel='c5'");
-    expect(msg).toContain("trellis channel kill");
+    expect(msg).toContain("trellis-lite channel kill");
     expect(msg).toContain("--max-live-workers");
   });
 

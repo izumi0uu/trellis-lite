@@ -34,10 +34,9 @@ describe("cleanupEmptyDirs", () => {
   });
 
   it("removes empty subdirectory under managed path", () => {
-    // Create .claude/commands/ (empty)
-    fs.mkdirSync(path.join(tmpDir, ".claude", "commands"), { recursive: true });
-    cleanupEmptyDirs(tmpDir, ".claude/commands");
-    expect(fs.existsSync(path.join(tmpDir, ".claude", "commands"))).toBe(false);
+    fs.mkdirSync(path.join(tmpDir, ".codex", "agents"), { recursive: true });
+    cleanupEmptyDirs(tmpDir, ".codex/agents");
+    expect(fs.existsSync(path.join(tmpDir, ".codex", "agents"))).toBe(false);
   });
 
   it("does not remove non-empty directory", () => {
@@ -297,7 +296,7 @@ describe("shouldExcludeFromBackup", () => {
   // after normalization, otherwise Trellis's native worktree protection
   // silently fails on Windows and `collectAllFiles` descends into nested
   // full project copies (observed in the field: stack-overflow crash on
-  // `trellis update --migrate`, late April 2026).
+  // `trellis-lite update --migrate`, late April 2026).
   it.each([
     ".claude\\worktrees\\feat-x\\src\\main.ts",
     ".trellis\\tasks\\04-17-foo\\prd.md",

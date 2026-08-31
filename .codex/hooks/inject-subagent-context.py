@@ -88,52 +88,9 @@ def find_repo_root(start_path: str) -> str | None:
 
 
 def _detect_platform(input_data: dict) -> str | None:
-    if _hook_event_name(input_data) == "SubagentStart":
-        return "codex"
-    if isinstance(input_data.get("cursor_version"), str):
-        return "cursor"
-    # CLAUDE_PROJECT_DIR is a compatibility alias that several hosts set
-    # alongside their own variable — CodeBuddy, ZCode and Trae all do. It must
-    # therefore be checked LAST, or every one of them is detected as claude and
-    # the context key becomes `claude_<their-session-id>`. That key does not
-    # match the session file `task.py start` wrote under the host's real name,
-    # so the sub-agent starts with no task context while the pointer exists on
-    # disk. Same fix as inject-workflow-state.py and session-start.py; this
-    # third copy was missed when those two were corrected.
-    env_map = {
-        "ZCODE_PROJECT_DIR": "zcode",
-        "CURSOR_PROJECT_DIR": "cursor",
-        "CODEBUDDY_PROJECT_DIR": "codebuddy",
-        "FACTORY_PROJECT_DIR": "droid",
-        "GEMINI_PROJECT_DIR": "gemini",
-        "QODER_PROJECT_DIR": "qoder",
-        "KIRO_PROJECT_DIR": "kiro",
-        "COPILOT_PROJECT_DIR": "copilot",
-        "TRAE_PROJECT_DIR": "trae",
-        # Last: the shared alias, only meaningful once no vendor key matched.
-        "CLAUDE_PROJECT_DIR": "claude",
-    }
-    for env_name, platform in env_map.items():
-        if os.environ.get(env_name):
-            return platform
-    script_parts = set(Path(sys.argv[0]).parts)
-    if ".claude" in script_parts:
-        return "claude"
-    if ".cursor" in script_parts:
-        return "cursor"
-    if ".gemini" in script_parts:
-        return "gemini"
-    if ".qoder" in script_parts:
-        return "qoder"
-    if ".codebuddy" in script_parts:
-        return "codebuddy"
-    if ".factory" in script_parts:
-        return "droid"
-    if ".kiro" in script_parts:
-        return "kiro"
-    if ".zcode" in script_parts:
-        return "zcode"
-    return None
+    # This Python hook is installed only for Codex. OMP uses its native
+    # TypeScript extension instead.
+    return "codex"
 
 
 def get_current_task(
@@ -170,7 +127,7 @@ def get_current_task(
 # Context Injection Limits (issue #441)
 #
 # Notice text and behavior mirrored byte-for-byte in the Pi TS extension
-# (templates/pi/extensions/trellis/index.ts.txt). Changing wording here
+# (templates/omp/extensions/trellis/index.ts.txt). Changing wording here
 # requires changing it there too.
 # =============================================================================
 
@@ -922,8 +879,7 @@ def _handle_codex_subagent_start(input_data: dict) -> None:
     if not subagent_type or not parent_session_id:
         return
 
-    # Payload cwd first, then our own — some hosts (CodeBuddy IDE 4.10.4)
-    # report "/" for every hook event. See inject-workflow-state.py.
+    # Prefer the payload cwd, then the hook process cwd.
     repo_root = None
     for candidate in (_string_value(input_data.get("cwd")), os.getcwd()):
         if not candidate:
@@ -971,241 +927,31 @@ def _handle_codex_subagent_start(input_data: dict) -> None:
     print(json.dumps(output, ensure_ascii=False))
 
 
-def _extract_subagent_name(value: Any) -> str:
-    """Extract a sub-agent name from common platform encodings.
-
-    Cursor's native Task args encode custom sub-agents as a protobuf oneof,
-    which can appear in hook JSON as either ``{"custom": {"name": "..."}}``
-    or ``{"type": {"case": "custom", "value": {"name": "..."}}}``.
-    """
-    direct = _string_value(value)
-    if direct:
-        return direct
-
-    if not isinstance(value, dict):
-        return ""
-
-    for key in ("name", "subagent_type_name", "subagentTypeName"):
-        direct = _string_value(value.get(key))
-        if direct:
-            return direct
-
-    custom = value.get("custom")
-    if isinstance(custom, dict):
-        custom_name = _string_value(custom.get("name"))
-        if custom_name:
-            return custom_name
-
-    oneof = value.get("type")
-    if isinstance(oneof, dict):
-        case_name = _string_value(oneof.get("case"))
-        if case_name == "custom":
-            nested_value = oneof.get("value")
-            if isinstance(nested_value, dict):
-                custom_name = _string_value(nested_value.get("name"))
-                if custom_name:
-                    return custom_name
-        if case_name:
-            return case_name
-
-    case_name = _string_value(value.get("case"))
-    if case_name == "custom":
-        nested_value = value.get("value")
-        if isinstance(nested_value, dict):
-            custom_name = _string_value(nested_value.get("name"))
-            if custom_name:
-                return custom_name
-    if case_name:
-        return case_name
-
-    for agent_name in AGENTS_ALL:
-        if agent_name in value:
-            return agent_name
-
-    return ""
-
-
-def _extract_subagent_type(tool_input: dict) -> str:
-    for key in (
-        "subagent_type",
-        "subagentType",
-        "subagent_type_name",
-        "subagentTypeName",
-        "subagent_name",
-        "subagentName",
-        "agent_type",
-        "agentType",
-        "name",
+def main() -> None:
+    if (
+        os.environ.get("TRELLIS_HOOKS") == "0"
+        or os.environ.get("TRELLIS_DISABLE_HOOKS") == "1"
     ):
-        agent_name = _extract_subagent_name(tool_input.get(key))
-        if agent_name:
-            return agent_name
-    return ""
-
-
-def _parse_hook_input(input_data: dict) -> tuple[str, str, dict]:
-    """Parse hook input across different platform formats.
-
-    Returns (subagent_type, original_prompt, tool_input).
-    Handles:
-    - Claude Code / Qoder / Droid: tool_name=Task|Agent, tool_input.subagent_type
-    - CodeBuddy: tool_name=task (IDE) or Task (CLI), tool_input.subagent_name
-    - Cursor: tool_name=Task|Subagent, tool_input.subagent_type
-    - Copilot CLI: toolName=task (camelCase key, lowercase value)
-    - ZCode: toolName=Agent, toolInput/tool_input.subagent_type
-    - Gemini CLI: tool_name IS the agent name (BeforeTool matcher already filtered)
-    - Kiro: agentSpawn hook, agent_name field at top level
-    """
-    tool_input = input_data.get("tool_input", {})
-    if not isinstance(tool_input, dict):
-        tool_input = input_data.get("toolInput", {})
-    if not isinstance(tool_input, dict):
-        tool_input = {}
-
-    # Standard format: Task/Agent tool with subagent_type
-    tool_name = input_data.get("tool_name", "") or input_data.get("toolName", "")
-    if tool_name.lower() in ("task", "agent", "subagent"):
-        return (
-            _extract_subagent_type(tool_input),
-            tool_input.get("prompt", ""),
-            tool_input,
-        )
-
-    # Kiro: agentSpawn hook passes agent_name at top level
-    agent_name = input_data.get("agent_name", "")
-    if agent_name:
-        return agent_name, tool_input.get("prompt", input_data.get("prompt", "")), tool_input
-
-    # Gemini CLI: BeforeTool where tool_name IS the agent name
-    # (matcher already ensured it's one of our agents)
-    if tool_name in AGENTS_ALL:
-        return tool_name, tool_input.get("prompt", ""), tool_input
-
-    # Copilot CLI: toolName field (camelCase), value might be the agent name
-    tool_name_camel = input_data.get("toolName", "")
-    if tool_name_camel in AGENTS_ALL:
-        return tool_name_camel, input_data.get("toolArgs", ""), tool_input
-
-    return "", "", tool_input
-
-
-def main():
-    if os.environ.get("TRELLIS_HOOKS") == "0" or os.environ.get("TRELLIS_DISABLE_HOOKS") == "1":
-        sys.exit(0)
+        return
 
     try:
         input_data = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        sys.exit(0)
+    except (json.JSONDecodeError, OSError):
+        return
     if not isinstance(input_data, dict):
-        sys.exit(0)
+        return
 
-    if _hook_event_name(input_data) == "SubagentStart":
-        try:
-            _handle_codex_subagent_start(input_data)
-        except Exception:
-            # A native context hook must never prevent Codex from spawning the
-            # requested child when its runtime state is unavailable or stale.
-            pass
-        sys.exit(0)
+    # Trellis Lite installs this hook only for Codex SubagentStart. OMP uses
+    # its native TypeScript extension and never executes this Python hook.
+    if _hook_event_name(input_data) != "SubagentStart":
+        return
 
-    subagent_type, original_prompt, tool_input = _parse_hook_input(input_data)
-    cwd = input_data.get("cwd", os.getcwd())
-
-    # Only handle subagent types we care about
-    if subagent_type not in AGENTS_ALL:
-        sys.exit(0)
-
-    # Find repo root
-    repo_root = find_repo_root(cwd)
-    if not repo_root:
-        sys.exit(0)
-
-    # Get current task directory (research doesn't require it)
-    task_dir = get_current_task(repo_root, input_data)
-
-    # implement/check need task directory
-    if subagent_type in AGENTS_REQUIRE_TASK:
-        if not task_dir:
-            sys.exit(0)
-        # Contain the pointer before reading anything through it. `task.py` now
-        # refuses to store a ref that leaves the repo, but a session file
-        # written before that fix can still hold one, and `trellis update`
-        # does not rewrite session files — so a poisoned pointer outlives the
-        # upgrade that closed the writer. This is the last hop before the
-        # task's prd.md/design.md reach the model prompt, so it checks again.
-        try:
-            root_real = os.path.realpath(repo_root)
-            # `.trellis` may itself be a symlink into a store outside the
-            # repo (#567); its real location is a second legitimate base.
-            workflow_real = os.path.realpath(os.path.join(repo_root, ".trellis"))
-            task_dir_full = os.path.realpath(os.path.join(repo_root, task_dir))
-            if not _real_path_contained(root_real, task_dir_full) and not (
-                _real_path_contained(workflow_real, task_dir_full)
-            ):
-                sys.exit(0)
-        except OSError:
-            sys.exit(0)
-        if not os.path.exists(task_dir_full):
-            sys.exit(0)
-
-    # Check for [finish] marker in prompt (check agent with finish context)
-    is_finish_phase = "[finish]" in original_prompt.lower()
-
-    # Get context and build prompt based on subagent type
-    if subagent_type == AGENT_IMPLEMENT:
-        assert task_dir is not None  # validated above
-        context = get_implement_context(repo_root, task_dir)
-        new_prompt = build_implement_prompt(original_prompt, context)
-    elif subagent_type == AGENT_CHECK:
-        assert task_dir is not None  # validated above
-        if is_finish_phase:
-            # Finish phase: use finish context (lighter, focused on final verification)
-            context = get_finish_context(repo_root, task_dir)
-            new_prompt = build_finish_prompt(original_prompt, context)
-        else:
-            # Regular check phase: use check context (full specs for self-fix loop)
-            context = get_check_context(repo_root, task_dir)
-            new_prompt = build_check_prompt(original_prompt, context)
-    elif subagent_type == AGENT_RESEARCH:
-        # Research can work without task directory
-        context = get_research_context(repo_root, task_dir)
-        new_prompt = build_research_prompt(original_prompt, context)
-    else:
-        sys.exit(0)
-
-    if not context:
-        sys.exit(0)
-
-    # Return updated input. Most platforms ignore unrecognized fields, so we
-    # include multiple formats. ZCode is stricter; live probing confirmed the
-    # nested Claude-compatible shape below reaches the sub-agent prompt.
-    updated = {**tool_input, "prompt": new_prompt}
-    if _detect_platform(input_data) == "zcode":
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "updatedInput": updated,
-            }
-        }
-    else:
-        output = {
-            # Claude Code / Qoder / CodeBuddy / Droid format
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "updatedInput": updated,
-            },
-            # Cursor format
-            "permission": "allow",
-            "updated_input": updated,
-            # Gemini format
-            "updatedInput": updated,
-        }
-
-    print(json.dumps(output, ensure_ascii=False))
-    sys.exit(0)
+    try:
+        _handle_codex_subagent_start(input_data)
+    except Exception:
+        # Missing or stale runtime state must not prevent Codex from spawning
+        # the requested subagent.
+        return
 
 
 if __name__ == "__main__":

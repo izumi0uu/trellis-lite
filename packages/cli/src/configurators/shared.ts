@@ -7,19 +7,8 @@
 
 import type { TemplateContext } from "../types/ai-tools.js";
 
-/**
- * Per-platform configure options threaded from `trellis init` flags.
- * Defined here (not in index.ts) so configurators can reference it without
- * a circular import.
- */
-export interface PlatformConfigureOptions {
-  /**
-   * Claude Code only: install the opt-in Trellis statusLine
-   * (`trellis init --with-statusline`). Off by default — see
-   * `configureClaude` in `claude.ts`.
-   */
-  withStatusline?: boolean;
-}
+/** Reserved for future Codex/OMP-specific configure options. */
+export type PlatformConfigureOptions = Record<string, never>;
 
 /**
  * Module-level resolved Python command, set by the init flow after probing.
@@ -96,7 +85,7 @@ export function replacePythonCommandLiterals(content: string): string {
  * - {{CMD_REF:name}}         → platform-specific command reference
  * - {{EXECUTOR_AI}}          → AI executor description
  * - {{USER_ACTION_LABEL}}    → user action label
- * - {{CLI_FLAG}}             → platform cli flag (e.g. "claude", "codex")
+ * - {{CLI_FLAG}}             → platform cli flag (`codex` or `omp`)
  * - {{#FLAG}}...{{/FLAG}}    → conditional include (when FLAG is true)
  * - {{^FLAG}}...{{/FLAG}}    → negated conditional (when FLAG is false)
  *
@@ -170,18 +159,12 @@ export function resolvePlaceholders(
 
 /**
  * Resolve placeholders for files written under `.agents/skills/` (the shared
- * Agent Skills directory consumed by multiple platforms via the upstream
- * `.agents/skills/` workspace alias — Codex, Gemini CLI 0.40+, etc.).
+ * Agent Skills directory consumed by Codex.
  *
  * Identical to {@link resolvePlaceholders} except that {@link CMD_REF} is
  * rendered in a platform-neutral form (`` `name` (Trellis command) ``)
  * instead of substituting a platform-specific prefix. This is the only
- * placeholder that varies between platforms in the auto-triggered skill templates
- * from `common/skills/`, so
- * neutralizing it makes the rendered SKILL.md files byte-identical regardless
- * of which Trellis configurator wrote them — eliminating the
- * "last-writer-wins" collision when both Codex and Gemini target
- * `.agents/skills/`.
+ * placeholder that varies between template contexts.
  *
  * `{{CLI_FLAG}}`, `{{EXECUTOR_AI}}`, `{{USER_ACTION_LABEL}}`, conditionals,
  * and `{{PYTHON_CMD}}` are still resolved from the platform context. The
@@ -238,17 +221,17 @@ export function resolvePlaceholdersNeutral(
 /** Skill description registry — maps template name to auto-trigger description. */
 const SKILL_DESCRIPTIONS: Record<string, string> = {
   start:
-    "Initializes an AI development session by reading workflow guides, developer identity, git status, active tasks, and project guidelines from .trellis/. Classifies incoming tasks and routes to brainstorm, direct edit, or task workflow. Use when beginning a new coding session, resuming work, starting a new task, or re-establishing project context.",
+    "Starts or resumes the bounded Trellis Lite workflow, loading the active task and its P/V/U/checker execution profile.",
   continue:
-    "Resume work on the current task. Loads the workflow Phase Index, figures out which phase/step to pick up at, then pulls the step-level detail via get_context.py --mode phase. Use when coming back to an in-progress task and you need to know what to do next.",
+    "Resume the current Trellis Lite task at planning, bounded implementation, or completion.",
   "finish-work":
     "Wrap up the current session: verify quality gate passed, remind user to commit, archive completed tasks, and record session progress to the developer journal. Use when done coding and ready to end the session.",
   "before-dev":
     "Discovers and injects project-specific coding guidelines from .trellis/spec/ before implementation begins. Reads spec indexes, pre-development checklists, and shared thinking guides for the target package. Use when starting a new coding task, before writing any code, switching to a different package, or needing to refresh project conventions and standards.",
   brainstorm:
-    "Guides collaborative requirements discovery before implementation. Creates task directory, seeds PRD, asks high-value questions one at a time, researches technical choices, and converges on MVP scope. Use when requirements are unclear, there are multiple valid approaches, or the user describes a new feature or complex task.",
+    "Creates a concise implementation plan and asks only for unresolved scope plus P/V/U/checker choices.",
   check:
-    "Comprehensive quality verification: spec compliance, lint, type-check, tests, cross-layer data flow, code reuse, and consistency checks. Use when code is written and needs quality verification, before committing changes, or to catch context drift during long sessions.",
+    "Runs one read-only Trellis Lite review when checker=report; never edits, verifies, or starts a fix/check loop.",
   "break-loop":
     "Deep bug analysis to break the fix-forget-repeat cycle. Analyzes root cause category, why fixes failed, prevention mechanisms, and captures knowledge into specs. Use after fixing a bug to prevent the same class of bugs.",
   "update-spec":
@@ -257,7 +240,7 @@ const SKILL_DESCRIPTIONS: Record<string, string> = {
 
 /**
  * Wrap resolved template content with YAML frontmatter for skill format.
- * Used by platforms that use SKILL.md (Codex, Kiro, Qoder, etc.).
+ * Used by Codex's SKILL.md files.
  */
 export function wrapWithSkillFrontmatter(
   name: string,
@@ -299,8 +282,7 @@ export function wrapWithCommandFrontmatter(
   }
   // JSON.stringify produces a double-quoted YAML scalar, which is safe even
   // when the description contains a colon (an unquoted plain scalar cannot
-  // contain ": " — some parsers reject it outright, e.g. Trae CLI's SlashCommand
-  // schema; others silently truncate at the second colon).
+  // contain ": ", which some YAML parsers reject in plain scalars.
   return `---\nname: ${name}\ndescription: ${JSON.stringify(
     description,
   )}\n---\n\n${content}`;
@@ -376,17 +358,10 @@ export interface ResolvedSkillFile {
  * Filter command templates based on platform capabilities.
  *
  * `start.md` is stripped only on platforms that are BOTH `agentCapable` AND
- * `hasHooks` — those platforms (Claude Code, Cursor, Kiro, Gemini, Qoder,
- * CodeBuddy, Copilot, Droid, Pi) have a SessionStart-style hook that
- * auto-injects the workflow overview, so a user-facing `start` would be
- * redundant.
+ * `hasHooks`. OMP injects workflow state through its extension; Codex keeps
+ * the start skill as a fallback when project hooks are unavailable.
  *
- * `agentCapable && !hasHooks` platforms (Codex, ZCode, OpenCode, Reasonix, Grok)
- * have no such hook (or use an out-of-band plugin), so they need the
- * user-invocable `trellis-start` skill / `start.md` command as fallback.
- * Snow is class-1 (`hasHooks: true`) with auto inject + project agents.
- * Agent-less platforms (Kilo, Antigravity, Devin) also keep `start` since
- * they rely entirely on user-triggered workflows.
+ * Codex keeps the user-invocable `trellis-start` skill as a fallback.
  */
 function filterCommands(
   templates: CommonTemplate[],
@@ -400,7 +375,7 @@ function filterCommands(
 
 /**
  * Resolve ALL templates as skills with trellis- prefix.
- * Used by skill-only platforms (Kiro, Qoder, Codex) where everything is a skill.
+ * Used by Codex, where every command is exposed as a skill.
  *
  * `start` is filtered out on agent-capable platforms — the session-start hook
  * injects the workflow overview instead.
@@ -450,8 +425,7 @@ export function resolveSkills(ctx: TemplateContext): ResolvedTemplate[] {
  * Same as {@link resolveSkills} but uses {@link resolvePlaceholdersNeutral}
  * so the rendered SKILL.md files are byte-identical across any two platforms
  * that target `.agents/skills/`. Use this for shared `.agents/skills/`
- * writes (Gemini); platform-private skill roots should keep
- * {@link resolveSkills}.
+ * writes; platform-private skill roots should keep {@link resolveSkills}.
  */
 export function resolveSkillsNeutral(ctx: TemplateContext): ResolvedTemplate[] {
   return getSkillTemplates().map((tmpl) => ({
@@ -528,9 +502,9 @@ export function collectSkillTemplates(
 // Template maps — a platform's file set, described once
 //
 // `collect<Platform>Templates()` returns `Map<relPath, content>`: the single
-// description of what a platform installs. `trellis update` diffs that map and
+// description of what a platform installs. `trellis-lite update` diffs that map and
 // `configure` writes it through `writeTemplateMap`. Nothing else enumerates a
-// platform's files — two descriptions that disagree is how `trellis update`
+// platform's files — two descriptions that disagree is how `trellis-lite update`
 // silently stops managing a file (manifests/0.5.7.json).
 // ---------------------------------------------------------------------------
 
@@ -603,8 +577,7 @@ export function collectBothTemplates(
 }
 
 // ---------------------------------------------------------------------------
-// Pull-based sub-agent prelude (for class-2 platforms whose hook can't
-// inject sub-agent prompts: gemini, qoder, codex, copilot)
+// Pull-based sub-agent prelude for Codex when native hook injection is absent.
 //
 // Only implement & check need task-level context (task artifacts + jsonl specs).
 // research is orthogonal: it searches the spec tree and doesn't depend on an
@@ -730,79 +703,6 @@ export function applyPullBasedPreludeMarkdown(
       content: injectPullBasedPreludeMarkdown(a.content, t),
     };
   });
-}
-
-function mapLegacyToolToCopilot(tool: string): string[] {
-  switch (tool) {
-    case "Read":
-      return ["read"];
-    case "Write":
-    case "Edit":
-      return ["edit"];
-    case "Glob":
-    case "Grep":
-      return ["search"];
-    case "Bash":
-      return ["execute"];
-    // Generic MCP wildcard — used by trellis-research to opt into "any MCP
-    // tool the user has configured" without locking the source template to a
-    // specific provider. Claude Code parses wildcards as glob-match-at-runtime
-    // (no silent agent-registration skip if nothing matches), so this is the
-    // safe default; explicit `mcp__exa__*` names would silent-skip the agent
-    // when the Exa MCP server is absent (#302).
-    case "mcp__*":
-      return ["web", "exa/*", "chrome-devtools/*"];
-    case "mcp__exa__web_search_exa":
-    case "mcp__exa__get_code_context_exa":
-      return ["web", "exa/*"];
-    case "mcp__chrome-devtools__*":
-      return ["chrome-devtools/*"];
-    case "Skill":
-      return [];
-    default:
-      return [];
-  }
-}
-
-function normalizeCopilotMarkdownAgentFrontmatter(content: string): string {
-  const sections = splitMarkdownFrontmatter(content);
-  if (!sections) {
-    return content;
-  }
-
-  const frontmatter = sections.frontmatter.split(/\r?\n/);
-  const body = sections.body;
-  const normalized: string[] = [];
-
-  for (const line of frontmatter) {
-    if (!line.startsWith("tools:")) {
-      normalized.push(line);
-      continue;
-    }
-
-    const legacyTools = line
-      .slice("tools:".length)
-      .split(",")
-      .map((token) => token.trim())
-      .filter((token) => token.length > 0);
-    const tools = [...new Set(legacyTools.flatMap(mapLegacyToolToCopilot))];
-
-    normalized.push("tools:");
-    for (const tool of tools) {
-      normalized.push(`  - ${tool}`);
-    }
-  }
-
-  return `---\n${normalized.join("\n")}\n---\n${body}`;
-}
-
-export function normalizeCopilotMarkdownAgents(
-  agents: readonly AgentContent[],
-): AgentContent[] {
-  return agents.map((agent) => ({
-    ...agent,
-    content: normalizeCopilotMarkdownAgentFrontmatter(agent.content),
-  }));
 }
 
 export function applyPullBasedPreludeToml(

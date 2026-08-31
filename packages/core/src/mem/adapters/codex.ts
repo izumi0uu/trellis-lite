@@ -329,7 +329,7 @@ export function codexSearch(s: MemSessionInfo, kw: string): SearchHit {
 }
 
 /**
- * Codex twin of `collectClaudeTurnsAndEvents`. Single pass over the rollout
+ * Single pass over the Codex rollout
  * file; emits both the cleaned dialogue turns and the list of
  * `task.py create|start` invocations found inside `function_call` events whose
  * `name === "exec_command"` (or `"shell"`).

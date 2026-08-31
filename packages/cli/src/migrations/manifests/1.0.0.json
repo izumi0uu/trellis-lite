@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "description": "First independent Trellis Lite release for Codex and OMP with bounded P/V/U execution profiles",
+  "breaking": true,
+  "recommendMigrate": false,
+  "changelog": "**Trellis Lite fork:**\n- Supports only Codex and OMP.\n- Adds P0–P3 change scope, shared frontend/backend V0–V3 code verification, and independent U0–U3 browser/UI verification.\n- Uses Ego Lite by default for UI verification and requires explicit selection for Playwright, Cypress, Selenium, or project E2E tools.\n- Makes checker report mode optional, read-only, and single-pass.\n- Renames the CLI to `trellis-lite` / `tll` so it can coexist with official Trellis.",
+  "migrations": [],
+  "notes": "No user-data migration is required. Existing tasks, specs, workspace journals, and session history are preserved."
+}

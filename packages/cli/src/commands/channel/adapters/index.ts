@@ -1,7 +1,7 @@
 /**
  * Worker adapter factory.
  *
- * Each provider (claude, codex, future: opencode, gemini, …) implements a
+ * The Codex provider implements a
  * `WorkerAdapter` describing how to:
  *
  *   - launch the worker CLI (`buildArgs`)
@@ -19,12 +19,6 @@
 import type { ChildProcessByStdio } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 
-import {
-  buildClaudeArgs,
-  encodeClaudeInterruptMessage,
-  encodeClaudeUserMessage,
-  parseClaudeLine,
-} from "./claude.js";
 import {
   buildCodexArgs,
   buildCodexThreadStartParams,
@@ -48,18 +42,10 @@ export type WorkerChild = ChildProcessByStdio<Writable, Readable, Readable>;
 export type AdapterCtx = unknown;
 
 export interface SupervisorView {
-  /** Args passed to `buildArgs`. Adapters read what they need (model, resume, systemPrompt). */
+  /** Args passed to `buildArgs`. */
   resume?: string;
   model?: string;
   systemPrompt: string;
-  /**
-   * Path to a file containing the system prompt (written by the supervisor).
-   * When set, adapters that support file-based prompt flags (claude:
-   * `--append-system-prompt-file`) SHOULD use it instead of inlining the
-   * prompt on the command line — long command lines exceed OS limits
-   * (Windows CreateProcess: 32,767 chars → spawn ENAMETOOLONG).
-   */
-  systemPromptFile?: string;
   cwd: string;
   /** Codex-only: overrides the `thread/start` sandbox mode (default `workspace-write`). */
   sandbox?: CodexSandboxMode;
@@ -75,7 +61,7 @@ export interface WorkerAdapter<Ctx = AdapterCtx> {
   /**
    * Optional one-time setup AFTER the worker is spawned and stdout is piped,
    * BEFORE user messages flow. Adapters that need handshake (codex) do their
-   * `initialize` + `thread/start` here. Claude has none.
+   * `initialize` + `thread/start` here.
    */
   handshake?(args: {
     child: WorkerChild;
@@ -84,8 +70,7 @@ export interface WorkerAdapter<Ctx = AdapterCtx> {
   }): Promise<void>;
   /**
    * Returns true when the adapter can accept a user message via stdin.
-   * Codex requires the handshake to have populated `threadId`; Claude is
-   * always ready immediately after spawn.
+   * Codex requires the handshake to have populated `threadId`.
    */
   isReady(ctx: Ctx): boolean;
   /** Parse one line of worker stdout into channel events + side effects. */
@@ -101,34 +86,6 @@ export interface WorkerAdapter<Ctx = AdapterCtx> {
    */
   encodeInterruptMessage(text: string, ctx: Ctx): string;
 }
-
-/** Claude adapter — stream-json over stdio, no handshake. */
-const claudeAdapter: WorkerAdapter<undefined> = {
-  provider: "claude",
-  buildArgs(view) {
-    return buildClaudeArgs({
-      resumeSessionId: view.resume,
-      model: view.model,
-      systemPrompt: view.systemPrompt,
-      systemPromptFile: view.systemPromptFile,
-    });
-  },
-  createCtx() {
-    return undefined;
-  },
-  isReady() {
-    return true;
-  },
-  parseLine(line) {
-    return parseClaudeLine(line);
-  },
-  encodeUserMessage(text) {
-    return encodeClaudeUserMessage(text);
-  },
-  encodeInterruptMessage(text) {
-    return encodeClaudeInterruptMessage(text);
-  },
-};
 
 /** Codex adapter — JSON-RPC 2.0 via `app-server`, requires handshake. */
 const codexAdapter: WorkerAdapter<CodexCtx> = {
@@ -192,7 +149,6 @@ const codexAdapter: WorkerAdapter<CodexCtx> = {
  * No other file in the runtime needs to change.
  */
 const REGISTRY = {
-  claude: claudeAdapter,
   codex: codexAdapter,
 } as const;
 

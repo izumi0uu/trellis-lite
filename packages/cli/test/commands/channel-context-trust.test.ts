@@ -364,7 +364,7 @@ describe("agent-loader honors trusted roots", () => {
       fs.mkdirSync(extAgents, { recursive: true });
       fs.writeFileSync(
         path.join(extAgents, "architect.md"),
-        ["---", "name: architect", "provider: claude", "---", "", "Body"].join(
+        ["---", "name: architect", "provider: codex", "---", "", "Body"].join(
           "\n",
         ),
       );
@@ -377,7 +377,7 @@ describe("agent-loader honors trusted roots", () => {
       const trustedRoots = resolveTrustedRoots(cwd);
       const agent = loadAgent("architect", cwd, trustedRoots);
       expect(agent.systemPrompt).toBe("Body");
-      expect(agent.provider).toBe("claude");
+      expect(agent.provider).toBe("codex");
     },
   );
 
@@ -385,7 +385,7 @@ describe("agent-loader honors trusted roots", () => {
     fs.mkdirSync(path.join(cwd, ".trellis", "agents"), { recursive: true });
     fs.writeFileSync(
       path.join(cwd, ".trellis", "agents", "architect.md"),
-      ["---", "name: architect", "provider: claude", "---", "", "Body"].join(
+      ["---", "name: architect", "provider: codex", "---", "", "Body"].join(
         "\n",
       ),
     );

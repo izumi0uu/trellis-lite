@@ -1,168 +1,160 @@
-<p align="center">
-<picture>
-<source srcset="assets/trellis.png" media="(prefers-color-scheme: dark)">
-<source srcset="assets/trellis.png" media="(prefers-color-scheme: light)">
-<img src="assets/trellis.png" alt="Trellis Logo" width="500" style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges;">
-</picture>
-</p>
+# Trellis Lite
 
-<p align="center">
-<strong>An out-of-the-box engineering framework for AI coding.</strong><br/>
-<sub>AI writes code fast, but every session it starts from scratch — no memory of your project, your conventions, or your team's requirements. Trellis persists specs, tasks, and memory into your repo, so any coding agent works to your engineering standards.</sub>
-</p>
+Trellis Lite is an independent, smaller fork of
+[Trellis](https://github.com/mindfold-ai/Trellis). It keeps Trellis's durable
+task, spec, workspace-memory, and update model, but supports only **Codex** and
+**Oh My Pi (OMP)** and puts explicit limits around how coding agents change and
+verify a project.
 
-<p align="center">
-<a href="./README_CN.md">简体中文</a> •
-<a href="https://docs.trytrellis.app/">Docs</a> •
-<a href="https://docs.trytrellis.app/start/install-and-first-task">Quick Start</a> •
-<a href="https://docs.trytrellis.app/advanced/multi-platform">Supported Platforms</a> •
-<a href="https://docs.trytrellis.app/start/real-world-scenarios">Use Cases</a>
-</p>
+This is not the official Mindfold Trellis package. The package and executable
+names are intentionally different, so both projects can be installed on the
+same machine without replacing each other.
 
-<p align="center">
-<a href="https://www.npmjs.com/package/@mindfoldhq/trellis"><img src="https://img.shields.io/npm/v/@mindfoldhq/trellis.svg?style=flat-square&color=2563eb" alt="npm version" /></a>
-<a href="https://www.npmjs.com/package/@mindfoldhq/trellis"><img src="https://img.shields.io/npm/dw/@mindfoldhq/trellis?style=flat-square&color=cb3837&label=downloads" alt="npm downloads" /></a>
-<a href="https://github.com/mindfold-ai/Trellis/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-16a34a.svg?style=flat-square" alt="license" /></a>
-<a href="https://github.com/mindfold-ai/Trellis/stargazers"><img src="https://img.shields.io/github/stars/mindfold-ai/Trellis?style=flat-square&color=eab308" alt="stars" /></a>
-<a href="https://docs.trytrellis.app/"><img src="https://img.shields.io/badge/docs-trytrellis.app-0f766e?style=flat-square" alt="docs" /></a>
-<a href="https://discord.com/invite/tWcCZ3aRHc"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" /></a>
-<a href="https://github.com/mindfold-ai/Trellis/issues"><img src="https://img.shields.io/github/issues/mindfold-ai/Trellis?style=flat-square&color=e67e22" alt="open issues" /></a>
-<a href="https://github.com/mindfold-ai/Trellis/pulls"><img src="https://img.shields.io/github/issues-pr/mindfold-ai/Trellis?style=flat-square&color=9b59b6" alt="open PRs" /></a>
-<a href="https://deepwiki.com/mindfold-ai/Trellis"><img src="https://img.shields.io/badge/Ask-DeepWiki-blue?style=flat-square" alt="Ask DeepWiki" /></a>
-<a href="https://chatgpt.com/?q=Explain+the+project+mindfold-ai/Trellis+on+GitHub"><img src="https://img.shields.io/badge/Ask-ChatGPT-74aa9c?style=flat-square&logo=openai&logoColor=white" alt="Ask ChatGPT" /></a>
-</p>
+[简体中文](./README_CN.md) ·
+[Releases](https://github.com/izumi0uu/trellis-lite/releases) ·
+[Upstream Trellis](https://github.com/mindfold-ai/Trellis)
 
-<p align="center">
-<img src="assets/trellis-demo.gif" alt="Trellis workflow demo" width="100%">
-</p>
+## What changed
 
-## Why Trellis?
-
-| Capability | What it changes |
+| Area | Trellis Lite behavior |
 | --- | --- |
-| **Auto-injected specs** | Write conventions once in `.trellis/spec/`, then let Trellis inject the relevant context into each session instead of repeating yourself. |
-| **Task-centered workflow** | Keep PRDs, implementation context, review context, and task status in `.trellis/tasks/` so AI work stays structured. |
-| **Project memory** | Journals in `.trellis/workspace/` preserve what happened last time, so each new session starts with real context. |
-| **Team-shared standards** | Specs live in the repo, so one person's hard-won workflow or rule can benefit the whole team. |
-| **Multi-platform setup** | Bring the same Trellis structure to 22 AI coding platforms instead of rebuilding your workflow per tool. |
+| Platforms | Codex and OMP only; all other active platform integrations were removed. |
+| Change scope | Every durable task selects `P0–P3`, from exact requested edits to broad refactoring. |
+| Code verification | One shared frontend/backend level, `V0–V3`, with finite pass budgets. |
+| Browser/UI verification | Independent `U0–U3`; `U0` means no browser or UI validation at all. |
+| UI driver | Ego Lite is the default for `U1–U3`. If it is unavailable, the agent reports that instead of installing or silently substituting a tool. |
+| E2E tools | Playwright, Cypress, Selenium, and project E2E suites run only when explicitly selected as the UI driver. |
+| Checker | Off by default. Report mode is read-only, runs once, and cannot enter a fix/recheck loop. |
+| OMP enforcement | Native runtime gates block implementation and verification actions that exceed the selected profile. |
+| Codex enforcement | Project instructions, hooks, and the Codex sandbox/approval boundary carry the profile into the task. |
+| Upstream policy | Independent release line based on Trellis 0.6.16; no promise of continued upstream synchronization. |
 
-## Prerequisites:
+The selected profile is stored in `.trellis/tasks/<task>/task.json.lite`.
+Planning tasks fail closed until a valid profile has been recorded.
 
-- **Node.js** >= 18
-- **Python** >= 3.9
+## Profile levels
 
-## Quick Start
+`P` controls what may be changed:
+
+- `P0`: only the requested behavior and the smallest necessary files.
+- `P1`: small local cleanup or defensive handling directly required by the
+  change.
+- `P2`: normal cross-layer implementation inside the declared task boundary.
+- `P3`: broad refactoring or architectural change explicitly authorized by
+  the user.
+
+`V` controls frontend and backend code checks together. It does not authorize
+browser/UI automation:
+
+- `V0`: no commands; review the edited diff only.
+- `V1`: one focused check for the changed unit or file.
+- `V2`: focused tests plus the nearest relevant lint/typecheck/build check.
+- `V3`: the broader relevant suite, still with a finite retry budget.
+
+`U` is an independent browser/UI decision:
+
+- `U0`: no browser, component-behavior script, screenshot comparison, or E2E
+  verification.
+- `U1`: one focused Ego Lite interaction on the changed path.
+- `U2`: the changed user flow and its primary state transition.
+- `U3`: a broader explicitly bounded UI regression pass.
+
+`V3 + U0` still forbids UI verification. `U1–U3` do not silently authorize
+Playwright, Cypress, or Selenium.
+
+## Install the CLI
+
+Requirements: Node.js 18.17+, Python 3.9+, and pnpm 10.
+
+The current canonical install is from the tagged GitHub source. It creates only
+the `trellis-lite` and `tll` commands; an existing `trellis` command is left
+untouched.
 
 ```bash
-# 1. Install Trellis
-npm install -g @mindfoldhq/trellis@latest
+git clone --branch v1.0.0 --depth 1 https://github.com/izumi0uu/trellis-lite.git
+cd trellis-lite
+./scripts/install-cli.sh
 
-# 2. Initialize in your repo
-trellis init -u your-name
-
-# 3. Or initialize with the platforms you actually use
-trellis init --cursor --opencode --codex -u your-name
+trellis-lite --version
+tll --version
 ```
 
-See the [Quick Start](https://docs.trytrellis.app/start/install-and-first-task) and [Supported Platforms](https://docs.trytrellis.app/advanced/multi-platform) guides for setup details.
+For development, clone `main` instead of a release tag and run the same
+installer. The script installs dependencies, builds both workspaces, and uses
+a global npm link to this checkout. It does not use `sudo`, publish anything,
+or claim the `trellis`/`tl` executable names.
 
-## How to Use
+Remove only the linked Lite CLI with:
 
-The workflow is simple:
+```bash
+npm unlink --global trellis-lite
+```
 
-1. **Describe what you want** in natural language.
-2. **Brainstorm** with the AI one question at a time until the PRD is clear, then implementation begins.
-3. **Let it run** — the AI calls Trellis Implement and auto-checks the result against specs, lint, type-check, and tests.
-4. **Type `/trellis:finish-work`** when the work is done or the session context fills up. Trellis archives the task and updates journals.
+The npm package names are reserved as `trellis-lite` and
+`trellis-lite-core`, but v1.0.0 should be installed from GitHub until those
+packages are visible on the public npm registry.
 
-## How It Works
+## Initialize a project
 
-Trellis runs a 4-phase loop with auto-invoked skills and sub-agents:
+Choose one or both supported integrations:
 
-1. **Plan** — `trellis-brainstorm` walks through requirements one question at a time and writes `prd.md`. Research-heavy items go to a `trellis-research` sub-agent. The result is curated specs + research files referenced from `implement.jsonl` / `check.jsonl`.
-2. **Implement** — a `trellis-implement` sub-agent writes code from the PRD with the curated context auto-injected, no git commit.
-3. **Verify** — a `trellis-check` sub-agent reviews the diff against specs and runs lint, type-check, and tests, self-fixing where it can.
-4. **Finish** — a final check runs, then `trellis-update-spec` promotes new learnings back into `.trellis/spec/` so the next session starts smarter.
+```bash
+# Codex
+trellis-lite init --codex -u your-name
 
-## Resources
+# OMP
+trellis-lite init --omp -u your-name
 
-| Need                            | Link                                                                           |
-| ------------------------------- | ------------------------------------------------------------------------------ |
-| Install Trellis in a repo       | [Quick Start](https://docs.trytrellis.app/start/install-and-first-task)        |
-| Understand platform differences | [Supported Platforms](https://docs.trytrellis.app/advanced/multi-platform)     |
-| See the workflow in practice    | [Real-World Scenarios](https://docs.trytrellis.app/start/real-world-scenarios) |
-| Start from spec templates       | [Spec Templates](https://docs.trytrellis.app/templates/specs-index)            |
-| Track releases                  | [Changelog](https://docs.trytrellis.app/changelog)                             |
+# Both
+trellis-lite init --codex --omp -u your-name
+```
 
-## FAQ
+Use `trellis-lite update` to refresh managed files in an existing project.
+Project tasks, specs, workspace journals, and session history are user data;
+update and migration operations preserve them.
 
-<details>
-<summary><strong>How is Trellis different from <code>CLAUDE.md</code>, <code>AGENTS.md</code>, or <code>.cursorrules</code>?</strong></summary>
+## Coexistence with official Trellis
 
-Those files are useful entry points, but they tend to become monolithic. Trellis adds scoped specs, task PRDs, workflow gates, workspace memory, and platform-aware generated files around them.
+| Product | npm package | Commands |
+| --- | --- | --- |
+| Trellis Lite | `trellis-lite` | `trellis-lite`, `tll` |
+| Official Trellis | `@mindfoldhq/trellis` | `trellis`, `tl` |
 
-</details>
+Do not use `trellis update` when you mean to update a Lite project. The Lite
+CLI always prints its full product name and recommends `trellis-lite ...`
+commands in follow-up instructions.
 
-<details>
-<summary><strong>Is Trellis only for Claude Code?</strong></summary>
+## Supported surfaces
 
-No. Trellis is a project layer that works across multiple coding agents and IDEs.
+| Capability | Codex | OMP |
+| --- | --- | --- |
+| Project integration | `.codex/` | `.omp/` |
+| Shared skills | `.agents/skills/` | `.agents/skills/` |
+| Context injection | Python hooks | Native TypeScript extension |
+| Session memory | `~/.codex/sessions/` | OMP's Pi-compatible storage under `~/.pi/agent/sessions/` |
+| Channel worker process | Codex | Not provided |
 
-</details>
+The `.pi` path is OMP's underlying session-storage format. It does not mean
+that standalone Pi Agent is a supported Trellis Lite platform.
 
-<details>
-<summary><strong>Is Trellis for solo developers or teams?</strong></summary>
+Historical migration manifests and narrowly scoped uninstall scrubbers remain
+so projects created by upstream Trellis can safely remove obsolete managed
+files. They are compatibility data, not active platform support.
 
-Both. Solo developers use it for memory and repeatable workflow. Teams get the larger benefit: shared standards, task boundaries, reviewable context, and platform portability.
+## Development and release checks
 
-</details>
+```bash
+pnpm install --frozen-lockfile
+pnpm lint
+pnpm typecheck
+pnpm build
+pnpm test
+node packages/cli/scripts/release-preflight.js verify-packed-cli
+```
 
-<details>
-<summary><strong>Do I have to write every spec file manually?</strong></summary>
+## License and attribution
 
-No. Many teams start by letting AI draft specs from existing code and then tighten the important parts by hand. Trellis works best when you keep the high-signal rules explicit and versioned.
-
-</details>
-
-<details>
-<summary><strong>Can teams use this without constant conflicts?</strong></summary>
-
-Yes. Personal workspace journals stay separate per developer, while shared specs and tasks stay in the repo where they can be reviewed and improved like any other project artifact.
-
-</details>
-
-<details>
-<summary><strong>Can I temporarily compare a project with and without Trellis?</strong></summary>
-
-Yes. `trellis ablate` temporarily removes all supported project-owned Trellis
-surfaces after creating a verified recovery transaction outside the project.
-Start a fresh agent session for the comparison, then run `trellis restore` to
-recover the exact prior state. Use `--dry-run` to preview either operation.
-The private recovery transaction includes exact `.trellis` task, spec, and
-workspace bytes, which may contain user-authored sensitive text, and is kept
-until restore verifies successfully.
-
-This is different from `trellis uninstall` (permanent removal) and
-`TRELLIS_HOOKS=0` (hooks only). Ablation does not launch agents, manage
-worktrees, hide Git changes, or remove the global CLI, channel logs, or host
-transcripts. If a managed path changes while ablated, restore refuses all
-writes until the conflict is resolved.
-
-</details>
-
-## Star History
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=mindfold-ai/Trellis&type=Date)](https://star-history.dera.page/#mindfold-ai/Trellis&Date)
-
-## Community & Resources
-
-- [Official Docs](https://docs.trytrellis.app/)
-- [GitHub Issues](https://github.com/mindfold-ai/Trellis/issues)
-- [Discord](https://discord.com/invite/tWcCZ3aRHc)
-- [Tech Blog](https://docs.trytrellis.app/blog)
-
-<p align="center">
-<a href="https://github.com/mindfold-ai/Trellis">Official Repository</a> •
-<a href="https://github.com/mindfold-ai/Trellis/blob/main/LICENSE">AGPL-3.0 License</a> •
-Built by <a href="https://github.com/mindfold-ai">Mindfold</a>
-</p>
+Trellis Lite is derived from
+[mindfold-ai/Trellis](https://github.com/mindfold-ai/Trellis), preserves the
+original Git history and copyright notices, and remains licensed under
+[AGPL-3.0](./LICENSE).

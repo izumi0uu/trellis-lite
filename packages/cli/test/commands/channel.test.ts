@@ -412,7 +412,7 @@ describe("channel storage and forum channels", () => {
       stdin: { write: stdinWrite },
     };
     const adapter = {
-      provider: "claude",
+      provider: "codex",
       buildArgs: vi.fn(),
       createCtx: vi.fn(),
       isReady: vi.fn(() => true),
@@ -497,7 +497,7 @@ describe("channel storage and forum channels", () => {
       stdin: { write: stdinWrite },
     };
     const adapter = {
-      provider: "claude",
+      provider: "codex",
       buildArgs: vi.fn(),
       createCtx: vi.fn(),
       isReady: vi.fn(() => true),

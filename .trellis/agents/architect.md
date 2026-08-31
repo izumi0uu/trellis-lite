@@ -97,7 +97,7 @@ Before accepting a breaking change, require:
 
 - What older versions wrote.
 - What the new version writes.
-- How `trellis update` detects pristine vs modified user files.
+- How `trellis-lite update` detects pristine vs modified user files.
 - Whether `breaking`, `recommendMigrate`, `migrationGuide`, `aiInstructions`,
   and migration entries are needed.
 - What happens for users skipping multiple versions.
@@ -214,7 +214,7 @@ repo inspection. Do not block the design on tooling freshness.
 
 ## Trellis-Specific Red Flags
 
-- `trellis update` behavior changes without a migration manifest strategy.
+- `trellis-lite update` behavior changes without a migration manifest strategy.
 - `breaking=true` and `recommendMigrate=true` without `migrationGuide`.
 - Rename/delete migrations that confuse pristine files with user-modified
   files.

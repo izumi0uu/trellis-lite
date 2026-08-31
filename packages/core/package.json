@@ -1,7 +1,7 @@
 {
-  "name": "@mindfoldhq/trellis-core",
-  "version": "0.6.16",
-  "description": "Trellis core SDK — channel and task domain primitives consumed by the Trellis CLI and downstream Node services",
+  "name": "trellis-lite-core",
+  "version": "1.0.0",
+  "description": "Trellis Lite core SDK for Codex/OMP task, channel, and memory primitives",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -58,7 +58,7 @@
     "agent",
     "events"
   ],
-  "author": "Mindfold LLC",
+  "author": "izumi0uu",
   "license": "AGPL-3.0-only",
   "devDependencies": {
     "@eslint/js": "^9.18.0",
@@ -73,6 +73,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/mindfold-ai/trellis.git"
+    "url": "https://github.com/izumi0uu/trellis-lite.git"
   }
 }

@@ -1,12 +1,11 @@
 /**
- * Public surface for `@mindfoldhq/trellis-core/mem` — reusable retrieval and
- * dialogue-context extraction over persisted Claude Code / Codex / OpenCode
- * sessions.
+ * Public surface for `trellis-lite-core/mem` — reusable retrieval and
+ * dialogue-context extraction over persisted Codex and Oh My Pi sessions.
  *
  * This subpackage is intentionally NOT re-exported from the root
- * `@mindfoldhq/trellis-core` barrel. Import it explicitly:
+ * `trellis-lite-core` barrel. Import it explicitly:
  *
- *   import { searchMemSessions } from "@mindfoldhq/trellis-core/mem";
+ *   import { searchMemSessions } from "trellis-lite-core/mem";
  *
  * v1 scope: persisted-session search and context extraction only. It does not
  * read channel / forum / thread event logs and has no cursor / pagination.

@@ -44,7 +44,7 @@ if [[ -d "$TRELLIS_DIR/workspace" ]]; then
     WORKSPACE_DIR="$TRELLIS_DIR/workspace"
 elif [[ -d "$TRELLIS_DIR/agent-traces" ]]; then
     WORKSPACE_DIR="$TRELLIS_DIR/agent-traces"
-    echo "Warning: Found agent-traces instead of workspace. Run 'trellis update' first."
+    echo "Warning: Found agent-traces instead of workspace. Run 'trellis-lite update' first."
     echo "Continuing anyway..."
 else
     echo "Error: Neither workspace nor agent-traces directory found"
