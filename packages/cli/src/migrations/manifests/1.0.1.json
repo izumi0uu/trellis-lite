@@ -1,0 +1,9 @@
+{
+  "version": "1.0.1",
+  "description": "Adds transactional adoption for existing Trellis projects and fixes re-init manifest ownership",
+  "breaking": false,
+  "recommendMigrate": false,
+  "changelog": "**Safe Trellis adoption:**\n- Adds `trellis-lite adopt` for the final stable Trellis 0.6.16 baseline. Earlier releases, prereleases, unknown forks, and Lite 1.x projects are outside the public adoption boundary; existing Lite projects use `trellis-lite update`.\n- Recognizes only final 0.6.16 Lite and task-reuse overlay outputs; unknown local differences fail closed.\n- Creates a verified external backup, archives recognized old framework files, preserves tasks/spec/workspace/runtime bytes, and rolls back on failure.\n- Re-init no longer re-scans the whole `.trellis/` tree, preventing runtime, overlay, backlog, trace, cache, and worktree files from entering `.template-hashes.json`.\n- Root `AGENTS.md` now identifies the product as Trellis Lite instead of official Trellis.",
+  "migrations": [],
+  "notes": "Do not uninstall official Trellis project files before adoption. Run `trellis-lite adopt --dry-run`, then `trellis-lite adopt --codex --omp --yes`. The official global CLI may be uninstalled separately after all projects have been adopted."
+}

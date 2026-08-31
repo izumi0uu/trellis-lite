@@ -60,11 +60,11 @@ Playwright、Cypress 或 Selenium。
 
 需要 Node.js 18.17+、Python 3.9+ 与 pnpm 10。
 
-当前标准安装方式是从 GitHub 的 v1.0.0 tag 构建并链接。安装只创建
+当前标准安装方式是从 GitHub 的 v1.0.1 tag 构建并链接。安装只创建
 `trellis-lite` 和 `tll`，不会覆盖机器上已有的 `trellis`：
 
 ```bash
-git clone --branch v1.0.0 --depth 1 https://github.com/izumi0uu/trellis-lite.git
+git clone --branch v1.0.1 --depth 1 https://github.com/izumi0uu/trellis-lite.git
 cd trellis-lite
 ./scripts/install-cli.sh
 
@@ -82,7 +82,7 @@ workspace，然后用全局 npm link 指向当前 checkout；它不会使用 `su
 npm unlink --global trellis-lite
 ```
 
-npm 包名已确定为 `trellis-lite` 和 `trellis-lite-core`。在 v1.0.0 尚未出现在
+npm 包名已确定为 `trellis-lite` 和 `trellis-lite-core`。在 v1.0.1 尚未出现在
 公共 npm registry 之前，应继续使用 GitHub 安装方式。
 
 ## 初始化项目
@@ -100,6 +100,37 @@ trellis-lite init --codex --omp -u your-name
 
 已有项目使用 `trellis-lite update` 刷新托管文件。tasks、specs、workspace
 journals 与 session history 都属于用户数据，更新和迁移不得删除它们。
+
+## 接管已有 Trellis 项目
+
+不要先删除项目里的 `.trellis/`，也不要先运行官方 `trellis uninstall`。Lite
+会原地接管已有文档：
+
+```bash
+cd /path/to/project
+
+# 完全只读的兼容性与冲突检查
+trellis-lite adopt --dry-run --codex --omp
+
+# 建立项目外备份、迁移并逐字节核对用户数据
+trellis-lite adopt --codex --omp --yes
+```
+
+只需要一个集成时，仅传 `--codex` 或 `--omp`。不传平台参数时，`adopt` 使用
+模板清单中已经登记的受支持平台。
+
+公开接管边界刻意保持单一：来源版本必须是官方最后一个稳定版 Trellis
+`0.6.16`。更早版本需要先通过显式的一次性迁移步骤升级；`0.7.0-beta.*`、
+未知 fork 和其他版本都不会被 `adopt` 接受。已经进入 Trellis Lite 版本线的
+项目使用 `trellis-lite update`，不再运行 `adopt`。
+
+默认备份位置在项目旁边的
+`.trellis-lite-backups/<project>-<timestamp>/`。也可以用 `--backup-dir` 指定
+其他项目外目录。遇到不支持的版本或无法识别的本地差异时，命令会在任何写入前
+停止；开始写入后若失败，则从已验证快照恢复所有托管根目录。
+
+所有项目接管并检查完成后，可以单独卸载机器上的官方 Trellis 全局 CLI。
+卸载全局 CLI 不会删除项目文档；删除 `.trellis/` 才会。
 
 ## 与官方 Trellis 共存
 

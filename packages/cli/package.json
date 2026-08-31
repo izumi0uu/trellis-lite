@@ -1,6 +1,6 @@
 {
   "name": "trellis-lite",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Trellis Lite: a bounded Codex and OMP workflow with explicit P/V/U verification budgets",
   "type": "module",
   "main": "./dist/index.js",

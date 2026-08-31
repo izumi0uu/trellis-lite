@@ -3,7 +3,7 @@
 
 These instructions are for AI assistants working in this project.
 
-This project is managed by Trellis. The working knowledge you need lives under `.trellis/`:
+This project is managed by Trellis Lite, the Codex and Oh My Pi focused fork. The working knowledge you need lives under `.trellis/`:
 
 - `.trellis/workflow.md` — development phases, when to create tasks, skill routing
 - `.trellis/spec/` — package- and layer-scoped coding guidelines (read before writing code in a given layer)
@@ -16,6 +16,6 @@ If you're using Codex or another agent-capable tool, additional project-scoped h
 - `.agents/skills/` — reusable Trellis skills
 - `.codex/agents/` — optional custom subagents
 
-Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis-lite update`.
+Managed by Trellis Lite. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis-lite update`.
 
 <!-- TRELLIS:END -->

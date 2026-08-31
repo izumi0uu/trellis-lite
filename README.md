@@ -71,7 +71,7 @@ the `trellis-lite` and `tll` commands; an existing `trellis` command is left
 untouched.
 
 ```bash
-git clone --branch v1.0.0 --depth 1 https://github.com/izumi0uu/trellis-lite.git
+git clone --branch v1.0.1 --depth 1 https://github.com/izumi0uu/trellis-lite.git
 cd trellis-lite
 ./scripts/install-cli.sh
 
@@ -91,7 +91,7 @@ npm unlink --global trellis-lite
 ```
 
 The npm package names are reserved as `trellis-lite` and
-`trellis-lite-core`, but v1.0.0 should be installed from GitHub until those
+`trellis-lite-core`, but v1.0.1 should be installed from GitHub until those
 packages are visible on the public npm registry.
 
 ## Initialize a project
@@ -112,6 +112,41 @@ trellis-lite init --codex --omp -u your-name
 Use `trellis-lite update` to refresh managed files in an existing project.
 Project tasks, specs, workspace journals, and session history are user data;
 update and migration operations preserve them.
+
+## Adopt an existing Trellis project
+
+Do not delete the project's `.trellis/` directory and do not run official
+`trellis uninstall` first. Lite adopts the existing documents in place:
+
+```bash
+cd /path/to/project
+
+# No-write compatibility and conflict audit
+trellis-lite adopt --dry-run --codex --omp
+
+# Verified external backup, migration, and byte-identity check
+trellis-lite adopt --codex --omp --yes
+```
+
+If only one integration is wanted, pass only `--codex` or `--omp`. With no
+platform flags, `adopt` uses the supported integrations already recorded in
+the project's template receipt.
+
+The public adoption boundary is intentionally narrow: the source version must
+be the final stable Trellis release, `0.6.16`. Earlier Trellis releases must be
+upgraded through an explicit one-time migration step before adoption;
+`0.7.0-beta.*`, unknown forks, and other versions are not accepted. Existing
+Trellis Lite projects use `trellis-lite update`, not `adopt`.
+
+By default the backup is written beside the project under
+`.trellis-lite-backups/<project>-<timestamp>/`. Use `--backup-dir` to choose a
+different location outside the project. Unsupported versions or local differences
+stop before any project write; a failure after mutation begins restores all
+managed roots from the verified snapshot.
+
+After every project has been adopted and checked, the global official Trellis
+CLI may be uninstalled independently. Removing the global CLI does not remove
+project documents; removing `.trellis/` does.
 
 ## Coexistence with official Trellis
 

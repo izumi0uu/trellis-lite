@@ -270,6 +270,12 @@ const EXCLUDE_FROM_HASH = [
   "tasks/", // Task files (user data)
   ".current-task", // Current task marker (file, not directory)
   ".trellis/spec/", // User-customized spec files
+  ".runtime/", // Session-local task pointers and runtime state
+  ".overlays/", // Historical overlay receipts, never Lite templates
+  "backlog/", // User-authored backlog records
+  "agent-traces/", // Session traces and agent output
+  "worktrees/", // Nested project worktrees
+  ".cache/", // Runtime caches
   ".backup-", // Backup directories
 ];
 
@@ -337,6 +343,12 @@ export interface InitializeHashesOptions {
    * a new platform's writes are recorded. Defaults to false (replace).
    */
   merge?: boolean;
+  /**
+   * Scan the installed `.trellis/` template tree. Full init uses this; the
+   * re-init/add-platform fast path disables it so runtime/user files cannot be
+   * swept into an existing receipt.
+   */
+  scanWorkflowTree?: boolean;
 }
 
 /**
@@ -359,7 +371,7 @@ export function initializeHashes(
   cwd: string,
   options: InitializeHashesOptions = {},
 ): number {
-  const { trackedPaths, merge = false } = options;
+  const { trackedPaths, merge = false, scanWorkflowTree = true } = options;
   const hashes: TemplateHashes = merge ? loadHashes(cwd) : {};
 
   // Platform + root files: hash only paths actually written this run.
@@ -384,14 +396,16 @@ export function initializeHashes(
   // `trellis-lite update`'s 3-way merge of workflow.md / config.yaml / scripts;
   // uninstall removes .trellis/ wholesale so it does not matter for the
   // data-loss bug this contract addresses.
-  const files = collectFiles(cwd, ".trellis");
-  for (const relativePath of files) {
-    const fullPath = path.join(cwd, relativePath);
-    try {
-      const content = fs.readFileSync(fullPath, "utf-8");
-      hashes[relativePath] = computeHash(content);
-    } catch {
-      // Skip files that can't be read (binary, etc.)
+  if (scanWorkflowTree) {
+    const files = collectFiles(cwd, ".trellis");
+    for (const relativePath of files) {
+      const fullPath = path.join(cwd, relativePath);
+      try {
+        const content = fs.readFileSync(fullPath, "utf-8");
+        hashes[relativePath] = computeHash(content);
+      } catch {
+        // Skip files that can't be read (binary, etc.)
+      }
     }
   }
 

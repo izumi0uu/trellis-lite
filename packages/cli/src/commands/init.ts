@@ -881,6 +881,7 @@ async function handleReinit(
     const hashedCount = initializeHashes(cwd, {
       trackedPaths: reinitWritten,
       merge: true,
+      scanWorkflowTree: false,
     });
     if (hashedCount > 0) {
       console.log(
@@ -1044,9 +1045,7 @@ export async function init(options: InitOptions): Promise<void> {
   const banner = figlet.textSync("Trellis Lite", { font: "Rebel" });
   console.log(chalk.cyan(`\n${banner.trimEnd()}`));
   console.log(
-    chalk.gray(
-      "\n   Bounded P/V/U workflow for Codex and Oh My Pi\n",
-    ),
+    chalk.gray("\n   Bounded P/V/U workflow for Codex and Oh My Pi\n"),
   );
 
   // Set up proxy before any network calls

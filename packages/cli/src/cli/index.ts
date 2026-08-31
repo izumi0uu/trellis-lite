@@ -4,6 +4,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import { init } from "../commands/init.js";
 import { update } from "../commands/update.js";
+import { adopt } from "../commands/adopt.js";
 import { upgrade } from "../commands/upgrade.js";
 import { uninstall } from "../commands/uninstall.js";
 import { ablate, restore } from "../commands/ablate.js";
@@ -136,6 +137,38 @@ program
         createNew: options.createNew as boolean,
         allowDowngrade: options.allowDowngrade as boolean,
         migrate: options.migrate as boolean,
+      });
+    } catch (error) {
+      console.error(
+        chalk.red("Error:"),
+        error instanceof Error ? error.message : error,
+      );
+      if (process.env.DEBUG || process.env.TRELLIS_DEBUG) {
+        console.error(error instanceof Error ? error.stack : error);
+      }
+      process.exit(1);
+    }
+  });
+
+program
+  .command("adopt")
+  .description("Adopt a Trellis 0.6.16 project into Trellis Lite 1.x")
+  .option("--codex", "Adopt or add the Codex integration")
+  .option("--omp", "Adopt or add the Oh My Pi integration")
+  .option("-y, --yes", "Skip the final confirmation after preflight")
+  .option("--dry-run", "Run the complete read-only adoption preflight")
+  .option(
+    "--backup-dir <path>",
+    "External backup directory (must be outside the project)",
+  )
+  .action(async (options: Record<string, unknown>) => {
+    try {
+      await adopt({
+        codex: options.codex as boolean,
+        omp: options.omp as boolean,
+        yes: options.yes as boolean,
+        dryRun: options.dryRun as boolean,
+        backupDir: options.backupDir as string | undefined,
       });
     } catch (error) {
       console.error(

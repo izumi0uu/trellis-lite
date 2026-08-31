@@ -1,4 +1,50 @@
-# Trellis Lite v1.0.0
+# Trellis Lite v1.0.1
+
+This release adds the supported migration path from existing Trellis projects
+to the independent Lite line. Do not delete `.trellis/` or run official
+Trellis uninstall first: `trellis-lite adopt` takes ownership while preserving
+the existing documents and runtime state.
+
+## Safe project adoption
+
+```bash
+cd /path/to/existing-project
+trellis-lite adopt --dry-run --codex --omp
+trellis-lite adopt --codex --omp --yes
+```
+
+The command:
+
+- accepts only the final stable Trellis `0.6.16` baseline, including the final
+  audited task-reuse and legacy Lite overlay outputs;
+- rejects earlier Trellis releases, `0.7.0-beta.*`, unknown forks, and Lite
+  projects; Lite `1.0.x` projects continue with `trellis-lite update`;
+- performs a no-write conflict preflight before creating or changing files;
+- recognizes only the final reviewed `0.6.16` `trellis-lite` and
+  `trellis-task-reuse` overlay bytes;
+- creates a verified backup outside the project by default;
+- preserves and byte-compares tasks, specs, workspace journals, developer
+  identity, active-task pointers, session runtime data, backlog, and traces;
+- archives old `trellis-meta`, `cli_adapter.py`, and overlay receipts inside the
+  external backup;
+- rolls the managed roots back to their original snapshot if any write or
+  post-adoption verification fails;
+- refuses symlinked managed roots, unsupported versions, deleted required
+  templates, and unknown local modifications.
+
+Use `--backup-dir /absolute/path` to select another backup location. It must be
+outside the project.
+
+## Fixed
+
+- Re-running `trellis-lite init --codex --omp` on an existing project no longer
+  scans all of `.trellis/` into the template receipt.
+- Runtime state, old overlay receipts, backlog, traces, worktrees, and caches are
+  explicitly excluded from template hashing.
+- The managed `AGENTS.md` block identifies Trellis Lite by its independent
+  product name.
+
+## v1.0.0 baseline
 
 This is the first independent Trellis Lite release, based on Trellis 0.6.16.
 It is not an official Mindfold Trellis release and does not promise ongoing
@@ -32,7 +78,7 @@ upstream synchronization.
 - CLI banners, help, update prompts, diagnostics, templates, and bundled skills
   now point back to `trellis-lite ...` commands.
 
-The v1.0.0 source release can be installed with `./scripts/install-cli.sh`.
+The source release can be installed with `./scripts/install-cli.sh`.
 Public npm publication is separate from this GitHub release and requires npm
 owner credentials.
 

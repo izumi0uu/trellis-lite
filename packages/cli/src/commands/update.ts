@@ -85,6 +85,20 @@ export interface UpdateOptions {
   createNew?: boolean;
   allowDowngrade?: boolean;
   migrate?: boolean;
+  /** Internal adoption gate: abort before any project write on unknown edits. */
+  failOnConflict?: boolean;
+  /** Audited 0.6.16 overlay outputs accepted as managed during adoption. */
+  acceptedManagedHashes?: Readonly<Record<string, readonly string[]>>;
+  /** Platforms the adoption flow explicitly selected, including new additions. */
+  platforms?: readonly AITool[];
+  /** Skip the informational npm registry lookup during transactional adoption. */
+  skipRegistryCheck?: boolean;
+  /** Keep manifest pruning in memory until the conflict gate has passed. */
+  deferManifestWrites?: boolean;
+  /** Allow adopt's structure-proven AGENTS.md managed-block merge. */
+  allowManagedBlockMerge?: boolean;
+  /** Suppress upstream release ceremony that is irrelevant to fork adoption. */
+  adoptionMode?: boolean;
 }
 
 interface FileChange {
@@ -202,8 +216,15 @@ function mergeManagedBlockContent(
     return templateContent;
   }
 
-  const trimmed = existingContent.replace(/\s+$/, "");
-  return `${trimmed}\n\n${templateBlock}\n`;
+  if (existingContent.length === 0) {
+    return `${templateBlock}\n`;
+  }
+  const separator = existingContent.endsWith("\n\n")
+    ? ""
+    : existingContent.endsWith("\n")
+      ? "\n"
+      : "\n\n";
+  return `${existingContent}${separator}${templateBlock}\n`;
 }
 
 function buildManagedBlockTemplate(
@@ -881,6 +902,7 @@ function analyzeChanges(
   cwd: string,
   hashes: TemplateHashes,
   templates: Map<string, string>,
+  allowManagedBlockMerge = false,
 ): ChangeAnalysis {
   const result: ChangeAnalysis = {
     newFiles: [],
@@ -925,7 +947,16 @@ function analyzeChanges(
         if (
           (storedHash && storedHash === currentHash) ||
           (!storedHash &&
-            isKnownUntrackedTemplate(relativePath, existingContent))
+            isKnownUntrackedTemplate(relativePath, existingContent)) ||
+          (allowManagedBlockMerge &&
+            relativePath === FILE_NAMES.AGENTS &&
+            newContent ===
+              mergeManagedBlockContent(
+                existingContent,
+                agentsMdContent,
+                TRELLIS_BLOCK_START,
+                TRELLIS_BLOCK_END,
+              ))
         ) {
           // Either the tracked hash matches, or this is a known pristine template
           // from before the path was hash-tracked. Safe to auto-update.
@@ -942,6 +973,75 @@ function analyzeChanges(
   }
 
   return result;
+}
+
+/**
+ * Treat only byte-identical, audited 0.6.16 overlay files as managed.
+ *
+ * The retired Lite/task-reuse overlays sometimes updated a file without also
+ * updating the `.template-hashes.json` receipt. Adoption supplies the small
+ * set of final outputs reviewed at the 0.6.16 fork boundary.
+ * A path that is absent, unreadable, or has any other hash remains a normal
+ * local modification and is blocked by the adoption conflict gate.
+ */
+function applyAcceptedManagedHashes(
+  cwd: string,
+  hashes: TemplateHashes,
+  accepted: Readonly<Record<string, readonly string[]>> | undefined,
+): TemplateHashes {
+  if (!accepted) return hashes;
+
+  const effective = { ...hashes };
+  for (const [relativePath, allowedHashes] of Object.entries(accepted)) {
+    const fullPath = path.join(cwd, relativePath);
+    if (!fs.existsSync(fullPath)) continue;
+
+    try {
+      const stat = fs.lstatSync(fullPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) continue;
+      const actual = computeHash(fs.readFileSync(fullPath, "utf-8"));
+      if (allowedHashes.includes(actual)) {
+        effective[toPosix(relativePath)] = actual;
+      }
+    } catch {
+      // Leave unreadable paths on the ordinary conflict path.
+    }
+  }
+  return effective;
+}
+
+function assertNoAdoptionConflicts(
+  changes: ChangeAnalysis,
+  migrations: ClassifiedMigrations | null,
+  safeFileDeletes: SafeFileDeleteClassified[],
+): void {
+  const conflicts = new Set<string>();
+  for (const file of changes.changedFiles) {
+    conflicts.add(`${file.relativePath} (locally modified)`);
+  }
+  for (const file of changes.userDeletedFiles) {
+    conflicts.add(`${file.relativePath} (required template was deleted)`);
+  }
+  for (const item of migrations?.confirm ?? []) {
+    conflicts.add(`${item.from} (modified migration source)`);
+  }
+  for (const item of migrations?.conflict ?? []) {
+    conflicts.add(`${item.from} (migration target conflict)`);
+  }
+  for (const item of safeFileDeletes) {
+    if (item.action === "skip-modified") {
+      conflicts.add(`${item.item.from} (modified deprecated file)`);
+    }
+  }
+
+  if (conflicts.size === 0) return;
+  const details = [...conflicts]
+    .sort()
+    .map((item) => `  - ${item}`)
+    .join("\n");
+  throw new Error(
+    `Trellis Lite adoption stopped before writing because local differences need review:\n${details}`,
+  );
 }
 
 /**
@@ -2015,7 +2115,9 @@ export async function update(options: UpdateOptions): Promise<void> {
   // Get versions
   const projectVersion = getInstalledVersion(cwd);
   const cliVersion = VERSION;
-  const latestNpmVersion = await getLatestNpmVersion();
+  const latestNpmVersion = options.skipRegistryCheck
+    ? null
+    : await getLatestNpmVersion();
 
   // Version comparison
   const cliVsProject = compareVersions(cliVersion, projectVersion);
@@ -2056,7 +2158,9 @@ export async function update(options: UpdateOptions): Promise<void> {
       console.log(chalk.gray("Solutions:"));
       console.log(chalk.gray(`  1. Update your CLI: trellis-lite upgrade`));
       console.log(
-        chalk.gray(`  2. Force downgrade: trellis-lite update --allow-downgrade\n`),
+        chalk.gray(
+          `  2. Force downgrade: trellis-lite update --allow-downgrade\n`,
+        ),
       );
       return;
     }
@@ -2073,6 +2177,11 @@ export async function update(options: UpdateOptions): Promise<void> {
   // Load template hashes for modification detection
   let hashes = loadHashes(cwd);
   const isFirstHashTracking = Object.keys(hashes).length === 0;
+  hashes = applyAcceptedManagedHashes(
+    cwd,
+    hashes,
+    options.acceptedManagedHashes,
+  );
 
   // Handle unknown version - skip regular migrations but safe-file-delete still runs
   const isUnknownVersion = projectVersion === "unknown";
@@ -2110,10 +2219,16 @@ export async function update(options: UpdateOptions): Promise<void> {
   {
     const configuredPlatforms = new Set<AITool>(getConfiguredPlatforms(cwd));
     if (codexUpgradeNeeded) configuredPlatforms.add("codex");
+    for (const platform of options.platforms ?? []) {
+      configuredPlatforms.add(platform);
+    }
     const prune = pruneOrphanManifestKeys(
       cwd,
       [...configuredPlatforms],
       hashes,
+      {
+        persist: !options.dryRun && options.deferManifestWrites !== true,
+      },
     );
     if (prune.pruned.length > 0) {
       console.log(
@@ -2143,9 +2258,11 @@ export async function update(options: UpdateOptions): Promise<void> {
     })();
 
   // Collect templates (used for both migration classification and change analysis)
+  const extraPlatforms = new Set<AITool>(options.platforms ?? []);
+  if (codexUpgradeNeeded) extraPlatforms.add("codex");
   const templates = await collectTemplateFiles(
     cwd,
-    codexUpgradeNeeded ? new Set<AITool>(["codex"]) : undefined,
+    extraPlatforms.size > 0 ? extraPlatforms : undefined,
     breakingBypass,
   );
 
@@ -2288,7 +2405,12 @@ export async function update(options: UpdateOptions): Promise<void> {
   }
 
   // Analyze changes (pass hashes for modification detection)
-  const changes = analyzeChanges(cwd, hashes, templates);
+  const changes = analyzeChanges(
+    cwd,
+    hashes,
+    templates,
+    options.allowManagedBlockMerge,
+  );
   const unchangedFileHashRepairs = collectUnchangedFileHashRepairs(
     changes,
     hashes,
@@ -2296,6 +2418,13 @@ export async function update(options: UpdateOptions): Promise<void> {
 
   // Print summary
   printChangeSummary(changes);
+
+  if (options.failOnConflict) {
+    assertNoAdoptionConflicts(changes, classifiedMigrations, safeFileDeletes);
+    if (!options.dryRun && options.deferManifestWrites) {
+      saveHashes(cwd, hashes);
+    }
+  }
 
   // First-time hash tracking hint
   if (isFirstHashTracking && changes.changedFiles.length > 0) {
@@ -2349,18 +2478,21 @@ export async function update(options: UpdateOptions): Promise<void> {
     if (isSameVersion) {
       console.log(chalk.green("✓ Already up to date!"));
     } else {
-      // Version changed but no file changes needed — still update the version stamp
-      updateVersionFile(cwd);
+      // Version changed but no file changes needed — update the version stamp
+      // only for a real run. A dry-run is a strict no-write preflight.
+      if (!options.dryRun) {
+        updateVersionFile(cwd);
+      }
       if (isUpgrade) {
         console.log(
           chalk.green(
-            `✓ No file changes needed for ${projectVersion} → ${cliVersion}`,
+            `${options.dryRun ? "[Dry run] " : ""}✓ No file changes needed for ${projectVersion} → ${cliVersion}`,
           ),
         );
       } else if (isDowngrade) {
         console.log(
           chalk.green(
-            `✓ No file changes needed for ${projectVersion} → ${cliVersion} (downgrade)`,
+            `${options.dryRun ? "[Dry run] " : ""}✓ No file changes needed for ${projectVersion} → ${cliVersion} (downgrade)`,
           ),
         );
       }
@@ -2380,7 +2512,11 @@ export async function update(options: UpdateOptions): Promise<void> {
   }
 
   // Show breaking change warning before confirm
-  if (cliVsProject > 0 && projectVersion !== "unknown") {
+  if (
+    cliVsProject > 0 &&
+    projectVersion !== "unknown" &&
+    !options.adoptionMode
+  ) {
     const preConfirmMetadata = getMigrationMetadata(projectVersion, cliVersion);
     if (preConfirmMetadata.breaking) {
       console.log(chalk.cyan("═".repeat(60)));
@@ -2455,8 +2591,9 @@ export async function update(options: UpdateOptions): Promise<void> {
     }
   }
 
-  // Create complete backup of all managed platform/workflow directories
-  const backupDir = createFullBackup(cwd);
+  // Adoption already owns a verified external snapshot and rollback path.
+  // Avoid leaving a second partial backup inside the newly adopted project.
+  const backupDir = options.adoptionMode ? null : createFullBackup(cwd);
 
   if (backupDir) {
     console.log(
@@ -2592,7 +2729,11 @@ export async function update(options: UpdateOptions): Promise<void> {
   // Sentinel-gated, so users keep their customizations and re-running update
   // on already-migrated files is a no-op. Skipped on unknown / downgrade.
   let configSectionsAppended = 0;
-  if (cliVsProject > 0 && projectVersion !== "unknown") {
+  if (
+    cliVsProject > 0 &&
+    projectVersion !== "unknown" &&
+    !options.adoptionMode
+  ) {
     const sectionEntries = getConfigSectionsAddedBetween(
       projectVersion,
       cliVersion,
@@ -2676,7 +2817,11 @@ export async function update(options: UpdateOptions): Promise<void> {
   }
 
   // Create migration task if there are breaking changes with migration guides
-  if (cliVsProject > 0 && projectVersion !== "unknown") {
+  if (
+    cliVsProject > 0 &&
+    projectVersion !== "unknown" &&
+    !options.adoptionMode
+  ) {
     const metadata = getMigrationMetadata(projectVersion, cliVersion);
 
     if (metadata.breaking && metadata.migrationGuides.length > 0) {
@@ -2783,7 +2928,11 @@ export async function update(options: UpdateOptions): Promise<void> {
   }
 
   // Display breaking change warnings at the very end (so they don't scroll off screen)
-  if (cliVsProject > 0 && projectVersion !== "unknown") {
+  if (
+    cliVsProject > 0 &&
+    projectVersion !== "unknown" &&
+    !options.adoptionMode
+  ) {
     const finalMetadata = getMigrationMetadata(projectVersion, cliVersion);
 
     if (finalMetadata.breaking || finalMetadata.changelog.length > 0) {
