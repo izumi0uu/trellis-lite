@@ -21,6 +21,7 @@ vi.mock("node:child_process", () => ({
 
 import { adopt } from "../../src/commands/adopt.js";
 import { init } from "../../src/commands/init.js";
+import { VERSION } from "../../src/constants/version.js";
 import {
   computeHash,
   loadHashes,
@@ -106,7 +107,7 @@ describe("trellis-lite adopt", () => {
 
     expect(
       fs.readFileSync(path.join(project, ".trellis", ".version"), "utf-8"),
-    ).toBe("1.0.1");
+    ).toBe(VERSION);
     for (const [relativePath, content] of Object.entries(protectedFiles)) {
       expect(fs.readFileSync(path.join(project, relativePath), "utf-8")).toBe(
         content,
@@ -243,7 +244,7 @@ describe("trellis-lite adopt", () => {
       if (
         typeof target === "string" &&
         target === path.join(project, ".trellis", ".version") &&
-        data === "1.0.1"
+        data === VERSION
       ) {
         throw new Error("injected version write failure");
       }
