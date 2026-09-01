@@ -56,15 +56,32 @@ profile 之前会 fail closed，不能直接进入实现。
 即使选择 `V3 + U0`，也不能做 UI 验证；`U1–U3` 也不会自动授权
 Playwright、Cypress 或 Selenium。
 
+在 OMP 中，验证预算按“**当前会话 + 当前任务**”持久记录。重载扩展
+不会恢复预算；同一会话切换到另一个任务时，使用独立计数。一次 Bash
+tool call 在每个适用的预算中最多计一次；同一命令合并多个测试文件不会
+多扣，`rg test` 这类普通搜索也不会被误计。V 与 U 始终分开计数。
+
+非零预算用完后，用户可以在 OMP 输入框授权恰好一次额外验证：
+
+```text
+/trellis-authorize-verification code
+/trellis-authorize-verification ui
+```
+
+这个授权不能绕过 `V0`、`U0` 或已选 UI driver。如果同一条命令同时包含
+代码检查和 UI 自动化，必须两个预算都允许才执行，并各消耗一次。
+正常的 agent tool loop 不能直接调用这个 OMP slash 命令；验证预算是
+工作流/运行时约束，不是操作系统级安全沙箱。
+
 ## 安装 CLI
 
 需要 Node.js 18.17+、Python 3.9+ 与 pnpm 10。
 
-当前标准安装方式是从 GitHub 的 v1.0.1 tag 构建并链接。安装只创建
+当前标准安装方式是从 GitHub 的 v1.0.2 tag 构建并链接。安装只创建
 `trellis-lite` 和 `tll`，不会覆盖机器上已有的 `trellis`：
 
 ```bash
-git clone --branch v1.0.1 --depth 1 https://github.com/izumi0uu/trellis-lite.git
+git clone --branch v1.0.2 --depth 1 https://github.com/izumi0uu/trellis-lite.git
 cd trellis-lite
 ./scripts/install-cli.sh
 
@@ -82,7 +99,7 @@ workspace，然后用全局 npm link 指向当前 checkout；它不会使用 `su
 npm unlink --global trellis-lite
 ```
 
-npm 包名已确定为 `trellis-lite` 和 `trellis-lite-core`。在 v1.0.1 尚未出现在
+npm 包名已确定为 `trellis-lite` 和 `trellis-lite-core`。在 v1.0.2 尚未出现在
 公共 npm registry 之前，应继续使用 GitHub 安装方式。
 
 ## 初始化项目
@@ -99,7 +116,9 @@ trellis-lite init --codex --omp -u your-name
 ```
 
 已有项目使用 `trellis-lite update` 刷新托管文件。tasks、specs、workspace
-journals 与 session history 都属于用户数据，更新和迁移不得删除它们。
+journals 与 session history 都属于用户数据，更新和迁移不得删除它们。更新命令
+还会自动迁移已知旧 Lite profile 的活跃任务；无法识别的 profile 只警告、
+不写入，旧 `checker: "on"` 会改为 `off`，避免已执行过的 checker 再跑一次。
 
 ## 接管已有 Trellis 项目
 

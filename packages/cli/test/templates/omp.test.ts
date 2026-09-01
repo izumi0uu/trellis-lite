@@ -16,9 +16,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const templateDir = path.resolve(__dirname, "../../src/templates/omp");
 
 type OmpEventHandler = (event: unknown, ctx?: unknown) => unknown;
+type OmpCommandHandler = (args: string, ctx: unknown) => unknown;
 type OmpExtension = (pi: {
   on: (event: string, handler: OmpEventHandler) => void;
   sendMessage?: (message: unknown) => Promise<void>;
+  registerCommand?: (
+    name: string,
+    options: { description?: string; handler: OmpCommandHandler },
+  ) => void;
 }) => void;
 
 function loadOmpExtension(): OmpExtension {
@@ -46,7 +51,10 @@ function loadOmpExtension(): OmpExtension {
   vm.runInContext(compiled, sandbox);
   const extension = moduleObject.exports.default;
   if (!extension) throw new Error("OMP extension template has no default export");
-  return extension;
+  return (api) => extension({
+    ...api,
+    registerCommand: api.registerCommand ?? (() => undefined),
+  });
 }
 
 function captureOmpHandlers(): Map<string, OmpEventHandler> {
@@ -72,9 +80,21 @@ function makeOmpProject(): { root: string; taskDir: string; sessionId: string } 
 }
 
 async function captureProjectHandlers(root: string, sessionId: string): Promise<Map<string, OmpEventHandler>> {
+  return (await captureProjectRuntime(root, sessionId)).handlers;
+}
+
+async function captureProjectRuntime(
+  root: string,
+  sessionId: string,
+): Promise<{
+  handlers: Map<string, OmpEventHandler>;
+  commands: Map<string, OmpCommandHandler>;
+}> {
   const handlers = new Map<string, OmpEventHandler>();
+  const commands = new Map<string, OmpCommandHandler>();
   loadOmpExtension()({
     on: (event, handler) => handlers.set(event, handler),
+    registerCommand: (name, options) => commands.set(name, options.handler),
     sendMessage: async () => undefined,
   });
   const start = handlers.get("session_start");
@@ -84,7 +104,7 @@ async function captureProjectHandlers(root: string, sessionId: string): Promise<
     sessionManager: { getSessionId: () => sessionId },
     ui: { notify: () => undefined },
   });
-  return handlers;
+  return { handlers, commands };
 }
 
 function writeLiteProfile(
@@ -232,6 +252,33 @@ describe("omp templates", () => {
     expect(params).toEqual({ path: "README.md" });
   });
 
+  it("enforces verification when tool_call arrives before session_start", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    try {
+      writeLiteProfile(taskDir, {
+        verification_level: "V1",
+        max_verification_passes: 1,
+      });
+      const handler = captureOmpHandlers().get("tool_call");
+      if (!handler) throw new Error("OMP extension did not register tool_call");
+      const ctx = {
+        cwd: root,
+        sessionManager: { getSessionId: () => sessionId },
+      };
+      const event = {
+        type: "tool_call",
+        toolName: "bash",
+        input: { command: "uv run pytest tests -q && pnpm lint" },
+      };
+
+      expect(await handler(event, ctx)).toBeUndefined();
+      const exhausted = await handler(event, ctx) as { block?: boolean };
+      expect(exhausted.block).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("blocks browser verification at U0 even when code verification is V3", async () => {
     const { root, taskDir, sessionId } = makeOmpProject();
     writeLiteProfile(taskDir);
@@ -245,6 +292,67 @@ describe("omp templates", () => {
 
     expect(result.block).toBe(true);
     expect(result.reason).toContain("U0 forbids browser/UI verification");
+  });
+
+  it("recognizes Selenium and project-suite UI verification without charging searches", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    try {
+      writeLiteProfile(taskDir);
+      const handler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+      if (!handler) throw new Error("OMP extension did not register tool_call");
+      const ctx = { sessionManager: { getSessionId: () => sessionId } };
+
+      expect(await handler(
+        { type: "tool_call", toolName: "bash", input: { command: "rg selenium packages/cli" } },
+        ctx,
+      )).toBeUndefined();
+
+      for (const command of [
+        "npx selenium-side-runner tests/browser.side",
+        "uv run pytest tests/e2e -q",
+        "npx vitest --browser",
+        "npx vitest --browser=chromium",
+        "npx vitest --browser.enabled",
+        "pnpm test:browser",
+        "npm run test:e2e",
+      ]) {
+        const blocked = await handler(
+          { type: "tool_call", toolName: "bash", input: { command } },
+          ctx,
+        ) as { block?: boolean; reason?: string };
+        expect(blocked.block).toBe(true);
+        expect(blocked.reason).toContain("U0 forbids browser/UI verification");
+      }
+
+      writeLiteProfile(taskDir, {
+        ui_verification_level: "U1",
+        ui_driver: "project-suite",
+        max_ui_verification_passes: 1,
+      });
+      expect(await handler(
+        { type: "tool_call", toolName: "bash", input: { command: "uv run pytest tests/e2e -q" } },
+        ctx,
+      )).toBeUndefined();
+      const ledger = JSON.parse(fs.readFileSync(
+        path.join(root, ".trellis", ".runtime", "lite-budget", "omp_context_limits.json"),
+        "utf-8",
+      )) as Record<string, Record<string, { used: number }>>;
+      const taskLedger = ledger[".trellis/tasks/08-13-context-limits"] ?? {};
+      expect(taskLedger["ui:U1:project-suite"]?.used).toBe(1);
+      expect(taskLedger["code:V3"]).toBeUndefined();
+
+      for (const command of [
+        "npx vitest --browser=false",
+        "npx vitest --browser.enabled=no",
+      ]) {
+        expect(await handler(
+          { type: "tool_call", toolName: "bash", input: { command } },
+          ctx,
+        )).toBeUndefined();
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("requires explicit driver selection instead of falling back from Ego Lite", async () => {
@@ -263,7 +371,7 @@ describe("omp templates", () => {
 
     expect(result.block).toBe(true);
     expect(result.reason).toContain("selected ego-lite");
-    expect(result.reason).toContain("explicit user authorization");
+    expect(result.reason).toContain("change the Lite profile");
   });
 
   it("allows one explicitly selected Playwright pass and blocks the next", async () => {
@@ -282,6 +390,257 @@ describe("omp templates", () => {
     const second = await handler(event, ctx) as { block?: boolean; reason?: string };
     expect(second.block).toBe(true);
     expect(second.reason).toContain("budget exhausted");
+  });
+
+  it("rejects mixed UI drivers and atomically charges mixed code and UI verification", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    try {
+      writeLiteProfile(taskDir, {
+        verification_level: "V2",
+        max_verification_passes: 2,
+        ui_verification_level: "U1",
+        ui_driver: "playwright",
+        max_ui_verification_passes: 1,
+      });
+      const handler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+      if (!handler) throw new Error("OMP extension did not register tool_call");
+      const ctx = { sessionManager: { getSessionId: () => sessionId } };
+
+      const driverMismatch = await handler({
+        type: "tool_call",
+        toolName: "bash",
+        input: { command: "npx playwright test && npx cypress run" },
+      }, ctx) as { block?: boolean; reason?: string };
+      expect(driverMismatch.block).toBe(true);
+      expect(driverMismatch.reason).toContain("cypress");
+
+      const mixedEvent = {
+        type: "tool_call",
+        toolName: "bash",
+        input: { command: "uv run pytest tests -q && npx playwright test" },
+      };
+      expect(await handler(mixedEvent, ctx)).toBeUndefined();
+      const uiExhausted = await handler(mixedEvent, ctx) as { block?: boolean; reason?: string };
+      expect(uiExhausted.block).toBe(true);
+      expect(uiExhausted.reason).toContain("U1 budget exhausted");
+
+      const ledger = JSON.parse(fs.readFileSync(
+        path.join(root, ".trellis", ".runtime", "lite-budget", "omp_context_limits.json"),
+        "utf-8",
+      )) as Record<string, Record<string, { used: number }>>;
+      expect(ledger[".trellis/tasks/08-13-context-limits"]?.["code:V2"]?.used).toBe(1);
+      expect(ledger[".trellis/tasks/08-13-context-limits"]?.["ui:U1:playwright"]?.used).toBe(1);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("charges actual verification commands without charging Bash searches or quoted prose", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    try {
+      writeLiteProfile(taskDir, { max_verification_passes: 8 });
+      const handler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+      if (!handler) throw new Error("OMP extension did not register tool_call");
+      const ctx = { sessionManager: { getSessionId: () => sessionId } };
+
+      for (const command of [
+        "rg -n test src",
+        "grep tests README.md",
+        "rg playwright packages/cli",
+        "echo 'note; ruff check'",
+        "./build/my-app --version",
+        "vite --host 0.0.0.0",
+      ]) {
+        expect(await handler({ type: "tool_call", toolName: "bash", input: { command } }, ctx)).toBeUndefined();
+      }
+
+      for (const command of [
+        "uv run pytest tests/unit -q",
+        "npx vitest run src/example.test.ts",
+        "pnpm --filter trellis-lite lint",
+        "npm run typecheck",
+        "npm run build",
+        "python3 -m py_compile app.py",
+        "python3 -m compileall app",
+        "python3 scripts/migration_smoke.py",
+      ]) {
+        expect(await handler({ type: "tool_call", toolName: "bash", input: { command } }, ctx)).toBeUndefined();
+      }
+
+      const exhausted = await handler(
+        { type: "tool_call", toolName: "bash", input: { command: "npm test" } },
+        ctx,
+      ) as { block?: boolean; reason?: string };
+      expect(exhausted.block).toBe(true);
+      expect(exhausted.reason).toContain("/trellis-authorize-verification code");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks verification for a declared invalid profile while leaving inspection Bash available", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    try {
+      writeLiteProfile(taskDir, { checker: "on" });
+      const handler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+      if (!handler) throw new Error("OMP extension did not register tool_call");
+      const ctx = { sessionManager: { getSessionId: () => sessionId } };
+
+      expect(await handler(
+        { type: "tool_call", toolName: "bash", input: { command: "rg test packages/cli" } },
+        ctx,
+      )).toBeUndefined();
+
+      for (const command of ["uv run pytest tests -q", "npx playwright test"]) {
+        const blocked = await handler(
+          { type: "tool_call", toolName: "bash", input: { command } },
+          ctx,
+        ) as { block?: boolean; reason?: string };
+        expect(blocked.block).toBe(true);
+        expect(blocked.reason).toContain("profile is invalid");
+        expect(blocked.reason).toContain("set-lite-profile");
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for a malformed active task while leaving inspection Bash available", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    try {
+      fs.writeFileSync(path.join(taskDir, "task.json"), "{not-json");
+      const handler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+      if (!handler) throw new Error("OMP extension did not register tool_call");
+      const ctx = { sessionManager: { getSessionId: () => sessionId } };
+
+      expect(await handler(
+        { type: "tool_call", toolName: "bash", input: { command: "rg test packages/cli" } },
+        ctx,
+      )).toBeUndefined();
+
+      for (const event of [
+        { type: "tool_call", toolName: "bash", input: { command: "uv run pytest tests -q" } },
+        { type: "tool_call", toolName: "write", input: { path: "frontend/example.ts", content: "export {};" } },
+      ]) {
+        const blocked = await handler(event, ctx) as { block?: boolean; reason?: string };
+        expect(blocked.block).toBe(true);
+        expect(blocked.reason).toContain("active task.json");
+        expect(blocked.reason).toContain("JSON object");
+      }
+
+      fs.writeFileSync(path.join(taskDir, "task.json"), "[]");
+      const nonObject = await handler(
+        { type: "tool_call", toolName: "bash", input: { command: "npx playwright test" } },
+        ctx,
+      ) as { block?: boolean; reason?: string };
+      expect(nonObject.block).toBe(true);
+      expect(nonObject.reason).toContain("active task.json");
+      expect(nonObject.reason).toContain("JSON object");
+
+      fs.writeFileSync(path.join(taskDir, "task.json"), "null");
+      const nullRecord = await handler(
+        { type: "tool_call", toolName: "bash", input: { command: "uv run pytest tests -q" } },
+        ctx,
+      ) as { block?: boolean; reason?: string };
+      expect(nullRecord.block).toBe(true);
+      expect(nullRecord.reason).toContain("active task.json");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("persists code budgets across extension reloads and isolates tasks in one session", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    const secondTaskDir = path.join(root, ".trellis", "tasks", "09-01-second-task");
+    const sessionPath = path.join(root, ".trellis", ".runtime", "sessions", "omp_context_limits.json");
+    try {
+      writeLiteProfile(taskDir, {
+        verification_level: "V1",
+        max_verification_passes: 1,
+      });
+      fs.mkdirSync(secondTaskDir, { recursive: true });
+      writeLiteProfile(secondTaskDir, {
+        verification_level: "V1",
+        max_verification_passes: 1,
+      });
+      const event = { type: "tool_call", toolName: "bash", input: { command: "uv run pytest tests -q" } };
+      const ctx = { sessionManager: { getSessionId: () => sessionId } };
+      const firstHandler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+      if (!firstHandler) throw new Error("OMP extension did not register tool_call");
+      expect(await firstHandler(event, ctx)).toBeUndefined();
+
+      const reloadedHandler = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+      if (!reloadedHandler) throw new Error("OMP extension did not register tool_call after reload");
+      const firstTaskExhausted = await reloadedHandler(event, ctx) as { block?: boolean };
+      expect(firstTaskExhausted.block).toBe(true);
+
+      fs.writeFileSync(sessionPath, JSON.stringify({ current_task: "tasks/09-01-second-task" }));
+      expect(await reloadedHandler(event, ctx)).toBeUndefined();
+
+      fs.writeFileSync(sessionPath, JSON.stringify({
+        current_task: ".trellis/tasks/08-13-context-limits/../08-13-context-limits",
+      }));
+      const stillExhausted = await reloadedHandler(event, ctx) as { block?: boolean };
+      expect(stillExhausted.block).toBe(true);
+
+      const ledger = JSON.parse(fs.readFileSync(
+        path.join(root, ".trellis", ".runtime", "lite-budget", "omp_context_limits.json"),
+        "utf-8",
+      )) as Record<string, Record<string, { used: number }>>;
+      expect(ledger[".trellis/tasks/08-13-context-limits"]?.["code:V1"]?.used).toBe(1);
+      expect(ledger[".trellis/tasks/09-01-second-task"]?.["code:V1"]?.used).toBe(1);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("registers a user-only one-shot authorization that survives reload and is consumed once", async () => {
+    const { root, taskDir, sessionId } = makeOmpProject();
+    try {
+      writeLiteProfile(taskDir, {
+        verification_level: "V1",
+        max_verification_passes: 1,
+      });
+      const runtime = await captureProjectRuntime(root, sessionId);
+      const handler = runtime.handlers.get("tool_call");
+      const authorize = runtime.commands.get("trellis-authorize-verification");
+      if (!handler || !authorize) throw new Error("OMP extension did not register budget handlers");
+      const event = { type: "tool_call", toolName: "bash", input: { command: "uv run pytest tests -q" } };
+      const toolCtx = { sessionManager: { getSessionId: () => sessionId } };
+      expect(await handler(event, toolCtx)).toBeUndefined();
+      const exhausted = await handler(event, toolCtx) as { reason?: string };
+      expect(exhausted.reason).toContain("/trellis-authorize-verification code");
+
+      const notices: string[] = [];
+      const commandCtx = {
+        cwd: root,
+        sessionManager: { getSessionId: () => sessionId },
+        ui: { notify: (message: string) => notices.push(message) },
+      };
+      await authorize("ui", commandCtx);
+      await authorize("code", commandCtx);
+      await authorize("code", commandCtx);
+      expect(notices).toContain("U0 forbids verification; change the Lite profile instead of authorizing an extra pass.");
+      expect(notices).toContain("Authorized exactly one additional code verification pass for the active task.");
+      expect(notices).toContain("One additional code verification pass is already authorized.");
+
+      const reloaded = (await captureProjectHandlers(root, sessionId)).get("tool_call");
+      if (!reloaded) throw new Error("OMP extension did not register tool_call after authorization");
+      expect(await reloaded(event, toolCtx)).toBeUndefined();
+      const consumed = await reloaded(event, toolCtx) as { block?: boolean };
+      expect(consumed.block).toBe(true);
+
+      const ledger = JSON.parse(fs.readFileSync(
+        path.join(root, ".trellis", ".runtime", "lite-budget", "omp_context_limits.json"),
+        "utf-8",
+      )) as Record<string, Record<string, { used: number; extra_remaining: number }>>;
+      expect(ledger[".trellis/tasks/08-13-context-limits"]?.["code:V1"]).toEqual({
+        used: 2,
+        extra_remaining: 0,
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("enforces Lite path allow and forbid boundaries for write tools", async () => {

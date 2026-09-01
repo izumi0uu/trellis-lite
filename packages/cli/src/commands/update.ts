@@ -71,6 +71,7 @@ import {
   TRELLIS_BLOCK_END,
   TRELLIS_BLOCK_START,
 } from "../utils/managed-paths.js";
+import { writeFileAtomic } from "../utils/atomic-write.js";
 
 export {
   cleanupEmptyDirs,
@@ -136,6 +137,245 @@ const PROTECTED_PATHS = [
   `${DIR_NAMES.WORKFLOW}/.developer`,
   `${DIR_NAMES.WORKFLOW}/.current-task`,
 ];
+
+const LITE_CHANGE_MODES = new Set(["P0", "P1", "P2", "P3"]);
+const LITE_VERIFICATION_CAPS: Readonly<Record<string, number>> = {
+  V0: 0,
+  V1: 1,
+  V2: 3,
+  V3: 8,
+};
+const LITE_UI_VERIFICATION_CAPS: Readonly<Record<string, number>> = {
+  U0: 0,
+  U1: 1,
+  U2: 1,
+  U3: 3,
+};
+const LITE_CHECKER_MODES = new Set(["off", "report"]);
+const LITE_UI_DRIVERS = new Set([
+  "ego-lite",
+  "playwright",
+  "cypress",
+  "selenium",
+  "project-suite",
+]);
+
+interface LiteProfileMigration {
+  path: string;
+  relativePath: string;
+  data: Record<string, unknown>;
+  checkerReset: boolean;
+}
+
+interface LiteProfileMigrationWarning {
+  relativePath: string;
+  reason: string;
+}
+
+interface ActiveLiteProfileMigrationPlan {
+  migrations: LiteProfileMigration[];
+  warnings: LiteProfileMigrationWarning[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function isNonEmptyStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((item) => typeof item === "string" && item.trim().length > 0)
+  );
+}
+
+function isPassLimit(value: unknown, cap: number): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= cap
+  );
+}
+
+function passCapFor(
+  caps: Readonly<Record<string, number>>,
+  level: unknown,
+): number | null {
+  return typeof level === "string" &&
+    Object.prototype.hasOwnProperty.call(caps, level)
+    ? caps[level]
+    : null;
+}
+
+function migrateLegacyLiteProfile(
+  taskData: Record<string, unknown>,
+):
+  | { data: Record<string, unknown>; checkerReset: boolean }
+  | { warning: string }
+  | null {
+  if (!("lite" in taskData)) return null;
+  const profile = asRecord(taskData.lite);
+  if (!profile) return { warning: "lite must be an object" };
+
+  const changeMode = profile.change_mode;
+  const verificationLevel = profile.verification_level;
+  const verificationCap = passCapFor(LITE_VERIFICATION_CAPS, verificationLevel);
+  if (
+    typeof changeMode !== "string" ||
+    !LITE_CHANGE_MODES.has(changeMode) ||
+    typeof verificationLevel !== "string" ||
+    verificationCap === null
+  ) {
+    return { warning: "legacy profile has an unknown P/V level" };
+  }
+  if (
+    !isNonEmptyStringArray(profile.allowed_paths) ||
+    !isNonEmptyStringArray(profile.forbidden_paths) ||
+    typeof profile.selected_by !== "string" ||
+    profile.selected_by.trim().length === 0
+  ) {
+    return { warning: "legacy profile has malformed scope fields" };
+  }
+
+  let checker = profile.checker;
+  const checkerReset = checker === "on";
+  if (checkerReset) checker = "off";
+  if (typeof checker !== "string" || !LITE_CHECKER_MODES.has(checker)) {
+    return { warning: "legacy profile has an unknown checker mode" };
+  }
+
+  const uiLevel =
+    profile.ui_verification_level === undefined
+      ? "U0"
+      : profile.ui_verification_level;
+  const uiVerificationCap = passCapFor(LITE_UI_VERIFICATION_CAPS, uiLevel);
+  if (typeof uiLevel !== "string" || uiVerificationCap === null) {
+    return { warning: "legacy profile has an unknown UI verification level" };
+  }
+  const uiDriver =
+    profile.ui_driver === undefined ? "ego-lite" : profile.ui_driver;
+  if (typeof uiDriver !== "string" || !LITE_UI_DRIVERS.has(uiDriver)) {
+    return { warning: "legacy profile has an unknown UI driver" };
+  }
+  if (profile.scope_locked !== undefined && profile.scope_locked !== true) {
+    return { warning: "legacy profile has an invalid scope lock" };
+  }
+
+  const maxVerificationPasses =
+    profile.max_verification_passes === undefined
+      ? verificationCap
+      : profile.max_verification_passes;
+  if (!isPassLimit(maxVerificationPasses, verificationCap)) {
+    return { warning: "legacy profile has an invalid code verification cap" };
+  }
+  const maxUiVerificationPasses =
+    profile.max_ui_verification_passes === undefined
+      ? uiVerificationCap
+      : profile.max_ui_verification_passes;
+  if (!isPassLimit(maxUiVerificationPasses, uiVerificationCap)) {
+    return { warning: "legacy profile has an invalid UI verification cap" };
+  }
+
+  const migratedProfile: Record<string, unknown> = {
+    ...profile,
+    checker,
+    ui_verification_level: uiLevel,
+    ui_driver: uiDriver,
+    scope_locked: true,
+    max_verification_passes: maxVerificationPasses,
+    max_ui_verification_passes: maxUiVerificationPasses,
+  };
+  if (JSON.stringify(migratedProfile) === JSON.stringify(profile)) return null;
+  return {
+    data: { ...taskData, lite: migratedProfile },
+    checkerReset,
+  };
+}
+
+/**
+ * Plan the narrow, one-time schema upgrade for non-archived Lite tasks.
+ * Non-Lite tasks and archived history are deliberately outside this scan.
+ */
+function planActiveLiteProfileMigrations(
+  cwd: string,
+): ActiveLiteProfileMigrationPlan {
+  const plan: ActiveLiteProfileMigrationPlan = {
+    migrations: [],
+    warnings: [],
+  };
+  const tasksDir = path.join(cwd, DIR_NAMES.WORKFLOW, DIR_NAMES.TASKS);
+  if (!fs.existsSync(tasksDir)) return plan;
+
+  for (const entry of fs.readdirSync(tasksDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === DIR_NAMES.ARCHIVE) continue;
+    const taskJsonPath = path.join(tasksDir, entry.name, FILE_NAMES.TASK_JSON);
+    if (!fs.existsSync(taskJsonPath)) continue;
+    const relativePath = toPosix(path.relative(cwd, taskJsonPath));
+
+    let taskData: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(taskJsonPath, "utf-8"));
+      const record = asRecord(parsed);
+      if (!record) throw new Error("top level is not an object");
+      taskData = record;
+    } catch {
+      plan.warnings.push({
+        relativePath,
+        reason: "task.json is not a readable JSON object",
+      });
+      continue;
+    }
+
+    const migration = migrateLegacyLiteProfile(taskData);
+    if (!migration) continue;
+    if ("warning" in migration) {
+      plan.warnings.push({ relativePath, reason: migration.warning });
+      continue;
+    }
+    plan.migrations.push({
+      path: taskJsonPath,
+      relativePath,
+      data: migration.data,
+      checkerReset: migration.checkerReset,
+    });
+  }
+  return plan;
+}
+
+function printActiveLiteProfileMigrationPlan(
+  plan: ActiveLiteProfileMigrationPlan,
+): void {
+  if (plan.migrations.length > 0) {
+    console.log(chalk.cyan("  Active Lite profiles (schema upgrade):"));
+    for (const migration of plan.migrations) {
+      const suffix = migration.checkerReset ? " (legacy checker on → off)" : "";
+      console.log(chalk.cyan(`    ↑ ${migration.relativePath}${suffix}`));
+    }
+    console.log("");
+  }
+  if (plan.warnings.length > 0) {
+    console.warn(chalk.yellow("  Lite profiles not migrated automatically:"));
+    for (const warning of plan.warnings) {
+      console.warn(
+        chalk.yellow(`    ! ${warning.relativePath}: ${warning.reason}`),
+      );
+    }
+    console.warn("");
+  }
+}
+
+function applyActiveLiteProfileMigrations(
+  plan: ActiveLiteProfileMigrationPlan,
+): { migrated: number; checkerResets: number } {
+  let checkerResets = 0;
+  for (const migration of plan.migrations) {
+    writeFileAtomic(migration.path, JSON.stringify(migration.data, null, 2));
+    if (migration.checkerReset) checkerResets++;
+  }
+  return { migrated: plan.migrations.length, checkerResets };
+}
 
 function getManagedBlock(
   content: string,
@@ -2419,6 +2659,17 @@ export async function update(options: UpdateOptions): Promise<void> {
   // Print summary
   printChangeSummary(changes);
 
+  // Active task data is normally protected from update. The sole exception is
+  // this narrow schema migration for tasks that already declare a legacy Lite
+  // profile. Adoption has a byte-for-byte protected-data contract, while an
+  // unknown source or downgrade is not a safe basis for interpreting schema.
+  const shouldMigrateLiteProfiles =
+    !options.adoptionMode && !isUnknownVersion && cliVsProject >= 0;
+  const liteProfileMigrationPlan = shouldMigrateLiteProfiles
+    ? planActiveLiteProfileMigrations(cwd)
+    : { migrations: [], warnings: [] };
+  printActiveLiteProfileMigrationPlan(liteProfileMigrationPlan);
+
   if (options.failOnConflict) {
     assertNoAdoptionConflicts(changes, classifiedMigrations, safeFileDeletes);
     if (!options.dryRun && options.deferManifestWrites) {
@@ -2466,7 +2717,8 @@ export async function update(options: UpdateOptions): Promise<void> {
     changes.autoUpdateFiles.length === 0 &&
     changes.changedFiles.length === 0 &&
     !hasPendingMigrations &&
-    !hasSafeDeletes
+    !hasSafeDeletes &&
+    liteProfileMigrationPlan.migrations.length === 0
   ) {
     // The "already up to date" exit still has to repair the receipt: this is
     // exactly the clean tree where every file is `unchanged`, so it is the run
@@ -2748,6 +3000,24 @@ export async function update(options: UpdateOptions): Promise<void> {
     }
   }
 
+  // Re-scan after confirmation so a task edited while the update plan was on
+  // screen is migrated from its latest content, never from a stale snapshot.
+  // The normal update backup excludes tasks, so copy only the exact task.json
+  // files this narrow migration will write into the same backup directory.
+  let liteProfilesMigrated = 0;
+  let legacyCheckersReset = 0;
+  if (shouldMigrateLiteProfiles) {
+    const livePlan = planActiveLiteProfileMigrations(cwd);
+    if (backupDir) {
+      for (const migration of livePlan.migrations) {
+        backupFile(cwd, backupDir, migration.relativePath);
+      }
+    }
+    const result = applyActiveLiteProfileMigrations(livePlan);
+    liteProfilesMigrated = result.migrated;
+    legacyCheckersReset = result.checkerResets;
+  }
+
   // Update version file
   updateVersionFile(cwd);
 
@@ -2796,6 +3066,12 @@ export async function update(options: UpdateOptions): Promise<void> {
   }
   if (configSectionsAppended > 0) {
     console.log(`  Config sections added: ${configSectionsAppended}`);
+  }
+  if (liteProfilesMigrated > 0) {
+    console.log(`  Lite profiles migrated: ${liteProfilesMigrated}`);
+  }
+  if (legacyCheckersReset > 0) {
+    console.log(`  Legacy checkers reset to off: ${legacyCheckersReset}`);
   }
   if (backupDir) {
     console.log(`  Backup: ${path.relative(cwd, backupDir)}/`);

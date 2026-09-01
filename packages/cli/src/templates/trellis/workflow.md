@@ -42,7 +42,18 @@ One V level covers both frontend and backend code checks. There are no separate 
 - `V2` — focused tests plus relevant lint/typecheck, up to three passes total.
 - `V3` — broad project verification, up to eight passes total.
 
-Do not repeat a failing check after a fix unless the remaining budget permits it. When the budget is exhausted, report the evidence and ask before another pass.
+One Bash tool call consumes at most one code-verification pass, even when it
+runs several related checks. Searches and file inspection do not consume a
+pass merely because their arguments contain words such as `test` or `build`.
+OMP persists the counter for the active task inside the current session, so an
+extension reload does not reset it and switching tasks does not share it.
+
+Do not repeat a failing check after a fix unless the remaining budget permits
+it. When the budget is exhausted, report the evidence. The user may grant
+exactly one additional pass with `/trellis-authorize-verification code`. The
+normal agent tool loop cannot invoke this OMP slash command directly. This is
+a workflow/runtime guard, not an OS-level security sandbox. `V0` can be changed
+only by selecting a new profile, never by one-shot authorization.
 
 ### Browser/UI verification level
 
@@ -54,6 +65,12 @@ Browser/UI verification is independent of V. `V3` never overrides `U0`.
 - `U3` — up to three broader browser flows explicitly authorized by the user.
 
 For `U1–U3`, use Ego Lite (`ego-browser`) by default. If Ego Lite is unavailable, tell the user immediately; do not install it and do not silently fall back. Playwright, Cypress, Selenium, or a project E2E suite may run only when the user explicitly selects that driver, recorded as `ui_driver`.
+
+UI passes use a separate task-and-session counter. A Bash call containing both
+code checks and UI automation consumes one pass from each applicable budget,
+or none if either boundary blocks it. After exhaustion, only the user may grant
+one additional UI pass with `/trellis-authorize-verification ui`; this cannot
+override `U0` or the selected UI driver.
 
 ### Checker
 

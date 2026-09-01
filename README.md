@@ -62,6 +62,27 @@ browser/UI automation:
 `V3 + U0` still forbids UI verification. `U1–U3` do not silently authorize
 Playwright, Cypress, or Selenium.
 
+In OMP, verification budgets are persistent for the pair **current session +
+active task**. Reloading the extension does not restore the budget, while a
+different task in the same session has its own counter. One Bash tool call
+counts as one pass in each applicable bucket; combining several test files in
+that call does not multiply the charge, and ordinary searches such as `rg
+test` are not charged. Code and UI counters remain independent.
+
+When a non-zero budget is exhausted, the user can grant exactly one additional
+pass from the OMP prompt:
+
+```text
+/trellis-authorize-verification code
+/trellis-authorize-verification ui
+```
+
+The authorization cannot override `V0`, `U0`, or the selected UI driver. A
+single command containing both code checks and UI automation is allowed only
+when both budgets permit it, and then consumes one pass from each.
+The normal agent tool loop cannot invoke this OMP slash command directly;
+these budgets are workflow/runtime guards, not an OS-level security sandbox.
+
 ## Install the CLI
 
 Requirements: Node.js 18.17+, Python 3.9+, and pnpm 10.
@@ -71,7 +92,7 @@ the `trellis-lite` and `tll` commands; an existing `trellis` command is left
 untouched.
 
 ```bash
-git clone --branch v1.0.1 --depth 1 https://github.com/izumi0uu/trellis-lite.git
+git clone --branch v1.0.2 --depth 1 https://github.com/izumi0uu/trellis-lite.git
 cd trellis-lite
 ./scripts/install-cli.sh
 
@@ -91,7 +112,7 @@ npm unlink --global trellis-lite
 ```
 
 The npm package names are reserved as `trellis-lite` and
-`trellis-lite-core`, but v1.0.1 should be installed from GitHub until those
+`trellis-lite-core`, but v1.0.2 should be installed from GitHub until those
 packages are visible on the public npm registry.
 
 ## Initialize a project
@@ -111,7 +132,10 @@ trellis-lite init --codex --omp -u your-name
 
 Use `trellis-lite update` to refresh managed files in an existing project.
 Project tasks, specs, workspace journals, and session history are user data;
-update and migration operations preserve them.
+update and migration operations preserve them. The update command also
+migrates active tasks that use the known older Lite profile shape; it leaves
+unknown profiles untouched with a warning and changes legacy `checker: "on"`
+to `off` so an already-used checker is not dispatched again.
 
 ## Adopt an existing Trellis project
 

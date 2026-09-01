@@ -1,3 +1,95 @@
+# Trellis Lite v1.0.2
+
+This release makes OMP verification budgets durable and task-aware, removes
+keyword-based false positives, and automatically upgrades active tasks that
+still use the legacy Lite profile shape.
+
+## Durable, task-scoped OMP budgets
+
+- Stores dynamic counters under
+  `.trellis/.runtime/lite-budget/<context-key>.json`, outside task documents
+  and template receipts.
+- Isolates each budget by OMP session, canonical active task, verification
+  level, and UI driver.
+- Preserves counters across extension reloads and OMP process restarts while
+  keeping different tasks and new sessions independent.
+- Counts at most one code pass and one UI pass per Bash tool call. A mixed
+  code/UI command consumes both atomically or neither when one boundary blocks
+  it.
+
+## Explicit one-shot authorization
+
+After a non-zero budget is exhausted, the user can grant exactly one
+additional pass from the OMP prompt:
+
+```text
+/trellis-authorize-verification code
+/trellis-authorize-verification ui
+```
+
+The authorization is task- and session-scoped, survives an extension reload,
+cannot stack, and cannot override `V0`, `U0`, or the selected UI driver. It is
+an OMP user command rather than a Bash command, so the normal agent tool loop
+cannot invoke it directly. Verification budgets are workflow/runtime guards,
+not an OS-level security sandbox.
+
+## More accurate command classification
+
+- Recognizes common direct test, lint, typecheck, build, Python `-m`, package
+  runner, named verification-script, and shell `-c` invocations.
+- Does not charge searches or prose merely because they contain words such as
+  `test`, `build`, or `playwright`.
+- Treats a bare Vite development server as non-verification while still
+  recognizing `vite build`.
+- Checks every UI driver in a compound command, preventing a selected
+  Playwright profile from silently running Cypress or Selenium in the same
+  Bash call.
+- Routes `selenium-side-runner`, Pytest paths with an explicit `e2e` directory,
+  and Vitest `--browser` runs through the independent UI budget.
+- Intentionally remains a bounded common-command classifier, not a complete
+  POSIX shell interpreter.
+
+## Legacy Lite profile upgrade
+
+`trellis-lite update` now upgrades known legacy profiles in active task
+directories, including same-version updates:
+
+- preserves P/V choices, path boundaries, `selected_by`, and a valid custom V
+  pass limit;
+- adds `U0`, `ego-lite`, locked scope, and bounded default pass fields when
+  they are absent;
+- changes legacy `checker: "on"` to `off` so an already-used checker does not
+  run again;
+- leaves non-Lite tasks, archived tasks, already-current profiles, and unknown
+  or malformed profiles unchanged;
+- previews the operation during `--dry-run`, backs up the exact task JSON, and
+  writes the migrated document atomically.
+
+Declared-but-invalid Lite profiles now block actual code/UI verification Bash
+while ordinary inspection and search commands remain available.
+An active task whose `task.json` is malformed or not a JSON object likewise
+blocks edits and verification without blocking read-only inspection.
+
+## Release safety
+
+- Release commits now use repository-root exclusions, so `.trellis` task and
+  runtime data cannot be swept in when the release script runs from the CLI
+  package directory.
+- A release pushes only its own version tag instead of every unpublished local
+  tag.
+
+## Upgrade note
+
+Run `trellis-lite update` after installing v1.0.2. A currently running OMP
+extension instance must be reloaded or restarted once to load the new runtime.
+Counters that existed only in the old in-memory implementation cannot be
+reconstructed; after that one-time transition, the new ledger survives future
+reloads.
+
+Public npm publication remains separate from this GitHub source release.
+
+---
+
 # Trellis Lite v1.0.1
 
 This release adds the supported migration path from existing Trellis projects

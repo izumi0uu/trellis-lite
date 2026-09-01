@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_DIR = path.resolve(__dirname, "..");
+const REPO_ROOT = path.resolve(CLI_DIR, "../..");
 
 const RELEASE_TYPES = new Set([
   "patch",
@@ -142,7 +143,13 @@ function main() {
   // (parallel in-progress work, runtime artifacts) must never be swept into
   // "chore: pre-release updates" (#303). Staging .trellis/ only ever goes
   // through safe_commit.py's precise allowlist, never a blanket `git add -A`.
-  run("git add -A -- ':!docs-site' ':!marketplace' ':!.trellis'");
+  // Stage from the repository root: relative exclusions issued from
+  // packages/cli do not protect root-level task/runtime state. The exact
+  // submodule paths must also be excluded before Git descends into them.
+  run(
+    "git add -A -- . ':!.trellis' ':!docs-site' ':!marketplace'",
+    { cwd: REPO_ROOT },
+  );
   if (hasGitDiff()) {
     run("git commit -m 'chore: pre-release updates'");
   }
@@ -155,7 +162,11 @@ function main() {
   // Push HEAD to the branch we are actually on, by name. `HEAD` alone relies
   // on the remote having a same-named branch, and a bare `main` pushes the
   // local main ref regardless of where the release commit lives.
-  run(`git push origin "HEAD:${branch}" --tags`);
+  // Push only this release tag. `--tags` would also publish unrelated local
+  // upstream tags that intentionally do not belong to the Lite release line.
+  run(
+    `git push --atomic origin "HEAD:${branch}" "refs/tags/v${version}:refs/tags/v${version}"`,
+  );
   assertPushLanded(branch, `v${version}`);
 }
 

@@ -1,0 +1,9 @@
+{
+  "version": "1.0.2",
+  "description": "Makes OMP verification budgets durable and task-aware and upgrades legacy Lite profiles during update",
+  "breaking": false,
+  "recommendMigrate": false,
+  "changelog": "**Bounded verification that survives reloads:**\n- Persists OMP V/U counters per session and canonical active task, with independent code and UI buckets.\n- Adds user-only one-shot `/trellis-authorize-verification code|ui` commands after exhaustion; V0/U0 and the selected UI driver remain absolute boundaries.\n- Classifies actual common verification commands instead of charging searches or prose that merely mention test/build/UI keywords.\n- Atomically accounts for mixed code/UI Bash calls and rejects every mismatched UI driver in compound commands.\n- `trellis-lite update` upgrades known legacy active-task profiles, resets legacy `checker: on` to off, preserves task scope, and leaves unknown/current/archive profiles unchanged.\n- Release staging now excludes root `.trellis` data correctly and pushes only the current version tag.",
+  "migrations": [],
+  "notes": "Reload or restart an already-running OMP extension once after update. Historical in-memory counters cannot be reconstructed; subsequent counters persist in .trellis/.runtime/lite-budget/."
+}
