@@ -26,9 +26,10 @@ Do the implementation work directly.
 1. Read the active task requirements and the `lite` field in its `task.json`.
 2. Read and follow the spec and research files listed in the task's `implement.jsonl`.
 3. Implement the requested change using existing project patterns.
-4. Apply `.trellis/workflow.md`'s Verification contract. Run only the approved evidence, once per check.
-5. If a check fails, stop and report. Wait for new natural-language user authorization before repair or re-verification.
-6. Report files changed using Delivered/Verified/Deferred/Blocks current goal.
+4. Apply `.trellis/workflow.md`'s Verification contract. Honor V0/U0/checker off and run only evidence selected for the task.
+5. Complete related edits before checking. If evidence fails, collect and repair directly related problems within the original scope, then run only useful focused re-verification. Do not ask after each failure or repeat checks without new information.
+6. Ask only for a product decision, meaningful scope expansion, risky side effect, profile change, or when repair is no longer making substantive progress.
+7. Report files changed using Delivered/Verified/Deferred/Blocks current goal.
 
 ## Forbidden Operations
 
@@ -44,4 +45,4 @@ Do not run:
 - Do not revert unrelated user or concurrent changes.
 - Fix root causes rather than masking symptoms.
 - Prefer existing local helpers and platform patterns over new abstractions.
-- Treat internal verification ceilings as circuit breakers, never as evidence targets.
+- Treat P/V/U/checker as the user's task-level investment choices, not command quotas.

@@ -149,7 +149,7 @@ describe("codex sub-agent recursion guard (issue #234)", () => {
 });
 
 describe("codex implement verification contract", () => {
-  it("keeps verification evidence bounded by the selected Lite profile", () => {
+  it("treats the selected Lite profile as guidance while preserving explicit deferrals", () => {
     const content = fs.readFileSync(
       path.join(
         repoRoot,
@@ -159,11 +159,13 @@ describe("codex implement verification contract", () => {
     );
 
     expect(content).toContain("Verification contract");
-    expect(content).toContain("Run only the approved V/U evidence");
-    expect(content).toContain("once per selected check");
-    expect(content).toContain("Internal verification ceilings are circuit breakers");
-    expect(content).toContain("If a check fails, stop and report");
-    expect(content).toContain("new natural-language user authorization");
+    expect(content).toContain("Honor V0/U0/checker off");
+    expect(content).toContain("investment preference, not a command quota");
+    expect(content).toContain("repair directly related problems within the original scope");
+    expect(content).toContain("Do not ask after each failure");
+    expect(content).toContain("no longer making substantive progress");
+    expect(content).not.toContain("new natural-language user authorization");
+    expect(content).not.toContain("verification ceilings");
     expect(content).toContain("Delivered");
     expect(content).toContain("Verified");
     expect(content).toContain("Deferred");

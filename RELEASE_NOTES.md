@@ -1,3 +1,36 @@
+# Trellis Lite v1.1.1
+
+This update makes the Lite profile a lightweight working agreement instead of
+a verification command quota.
+
+## Autonomous in-scope convergence
+
+- Every durable task still presents P, V, U, and checker. Presets show their
+  resolved values and each value may be overridden; choices never carry from
+  one task to another.
+- P/V/U express the user's preferred scope, evidence depth, and time
+  investment. They do not tell the Agent to consume a fixed number of commands.
+- The Agent completes related edits before checking, consolidates useful
+  evidence, and may repair directly related failures within the original scope
+  without asking after every failure.
+- The Agent asks only for a product decision, meaningful scope expansion, risky
+  side effect, profile change, or when repeated attempts no longer make
+  substantive progress.
+
+## Simpler OMP enforcement
+
+- Removes the fixed V/U ceilings, runtime `lite-budget` ledger, and
+  `/trellis-authorize-verification` command.
+- V1–V3 and U1–U3 no longer count or block repeated verification commands.
+- Retains hard enforcement for V0, U0, the selected UI driver, invalid profiles,
+  locked path boundaries, and the report checker's read-only tool surface.
+- Checker `off` remains an explicit Agent contract instead of gaining a new
+  dispatch state machine.
+- Does not add a repair policy, retry counter, or replacement verification
+  state machine.
+
+---
+
 # Trellis Lite v1.1.0
 
 This release replaces Agent-visible numeric verification budgets with a

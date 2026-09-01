@@ -1,6 +1,6 @@
 # Trellis Lite Workflow
 
-Trellis Lite is a bounded task loop for Codex and Oh My Pi. The user chooses the change scope and verification evidence before product-code execution. Those choices are durable task state, not suggestions.
+Trellis Lite is a lightweight working agreement for Codex and Oh My Pi. The user chooses the change scope and verification evidence before product-code execution. Those choices communicate the user's preferred investment and explicit deferrals; they are not command quotas or a substitute for agent judgment.
 
 ## Triage
 
@@ -10,7 +10,8 @@ Trellis Lite is a bounded task loop for Codex and Oh My Pi. The user chooses the
 
 ## Required execution profile
 
-Before `task.py start`, ask for the applicable choices and record them with:
+Before `task.py start`, present and resolve P, V, U, and checker for this task,
+then record them with:
 
 ```bash
 python3 .trellis/scripts/task.py set-lite-profile <task> --preset focused \
@@ -25,9 +26,11 @@ Offer one preset:
 - `release` — `P2 / V3 / U0 / checker off`.
 - `custom` — individual profile flags.
 
-Presets are input shortcuts; only resolved profile fields persist. U and its driver
-may be overridden independently. Reuse choices already supplied by the user and do
-not raise a level from task complexity.
+Presets are input shortcuts; always show their resolved P/V/U/checker values so the
+user can accept or override each choice. Only resolved profile fields persist. U and
+its driver may be overridden independently. Reuse choices already supplied for this
+task, never carry choices from another task, and do not raise a level from task
+complexity.
 
 ### Change mode
 
@@ -40,16 +43,17 @@ not raise a level from task complexity.
 
 ### Verification contract
 
-Verification is evidence, not implementation completion. Report implementation,
-evidence, deferrals, and release readiness separately. Deferral does not block an
-implementation goal; evidence disproving an acceptance criterion does.
+Verification is evidence, not implementation completion or a command allowance.
+Report implementation, evidence, deferrals, and release readiness separately.
+Deferral does not block an implementation goal; evidence disproving an acceptance
+criterion does.
 
 One V level covers frontend and backend code evidence:
 
 - `V0` — defer code verification.
-- `V1` — run one focused evidence batch for the changed behavior or file.
-- `V2` — run only the related checks selected in advance; run each once.
-- `V3` — run only the release-readiness checklist selected in advance; run each once.
+- `V1` — prefer one focused evidence batch for the changed behavior or file.
+- `V2` — run the related checks selected in advance, consolidating compatible checks.
+- `V3` — run the selected release-readiness checklist without inventing extra gates.
 
 Name V2/V3 checks in the PRD or user-approved plan. Only that evidence set runs;
 the level itself adds no checks.
@@ -57,28 +61,29 @@ the level itself adds no checks.
 Browser/UI evidence is independent of V. `V3` never overrides `U0`:
 
 - `U0` — defer browser/UI verification and driver availability checks.
-- `U1` — run one focused interaction on the changed path.
-- `U2` — run the selected user flow and its relevant boundary/error state once.
-- `U3` — run only the broader UI checklist selected in advance; run each flow once.
+- `U1` — prefer one focused interaction on the changed path.
+- `U2` — run the selected user flow and its relevant boundary/error state.
+- `U3` — run the broader UI checklist selected in advance without adding flows.
 
 For `U1–U3`, default to Ego Lite (`ego-browser`). If unavailable, report it.
 Other UI tools require an explicit `ui_driver` selection.
 
-Run approved checks once. On failure, report and wait. Repair or re-verification
-requires new natural-language user authorization and the original P/path boundary.
-OMP cannot infer outcomes, so this is an agent contract.
+Complete related edits before checking and consolidate compatible evidence. If a
+check fails, collect the relevant failures and autonomously repair problems that are
+directly within the original P/path and acceptance boundary. Re-run only the evidence
+needed to show whether that repair worked. Do not ask after each file, failure, or
+repair step, and do not repeat checks that provide no new information.
 
-OMP's numeric ceilings are internal circuit breakers, never plans or completion
-criteria. Unused capacity remains unused. When tripped, the user may release the
-next matching action with `/trellis-authorize-verification code|ui`. Only one release
-may be outstanding; another may be granted after consumption. It never overrides
-`V0`, `U0`, the UI driver, or the approved evidence set.
+Ask the user only when repair requires a product decision, meaningful scope expansion,
+a risky side effect, a change to V/U/checker choices, or when repeated attempts are no
+longer making substantive progress. `V0`, `U0`, the selected UI driver, and checker
+`off` remain explicit user choices and cannot be overridden by agent judgment.
 
 Use this completion report:
 
 ```text
 Delivered: <implemented behavior, or incomplete + reason>
-Verified: <evidence run once and its result, or none>
+Verified: <evidence run and its result, or none>
 Deferred: <evidence intentionally left for later, or none>
 Blocks current goal: <yes/no + reason>
 ```
@@ -93,8 +98,8 @@ complete.
 
 ## Execution rules
 
-1. Read the active task's Lite profile and implement the smallest allowed change.
-2. Apply the Verification contract; a failure stops the round.
+1. Read the active task's Lite profile and implement the smallest sufficient change.
+2. Apply the Verification contract and converge directly related failures within scope.
 3. Keep checker findings report-only.
 4. Stop at the requested outcome and use the contract report.
 
@@ -105,7 +110,7 @@ Classify the request. For a durable implementation, create a task in planning. F
 [/workflow-state:no_task]
 
 [workflow-state:planning]
-Confirm requirements, write the minimum useful PRD, offer quick/focused/release/custom, record the resolved Lite profile and any selected V2/V3 checks, then run `task.py start`. Starting fails closed if the profile is missing or invalid.
+Confirm requirements, write the minimum useful PRD, present quick/focused/release/custom with their resolved P/V/U/checker values, record the user's choices and any selected V2/V3 checks, then run `task.py start`. Starting fails closed if the profile is missing or invalid.
 [/workflow-state:planning]
 
 [workflow-state:in_progress]

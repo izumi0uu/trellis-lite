@@ -2,8 +2,8 @@
 
 Trellis Lite 是 [Trellis](https://github.com/mindfold-ai/Trellis) 的独立精简
 fork。它保留 Trellis 的任务、spec、workspace 记忆和安全更新模型，但只支持
-**Codex** 与 **Oh My Pi（OMP）**，并为智能体的改动范围和验证行为设置明确
-上限。
+**Codex** 与 **Oh My Pi（OMP）**，并为智能体提供关于改动范围、证据深度和
+用户时间投入的轻量工作约定。
 
 这不是 Mindfold 官方 Trellis 包。npm 包名和可执行命令都刻意分开，因此
 Lite 与官方 Trellis 可以共存，不会互相覆盖。
@@ -23,7 +23,7 @@ Lite 与官方 Trellis 可以共存，不会互相覆盖。
 | UI driver | `U1–U3` 默认使用 Ego Lite；若不可用，只提醒用户，不自动安装或静默换工具。 |
 | E2E 工具 | 只有用户明确选择时，才运行 Playwright、Cypress、Selenium 或项目 E2E 套件。 |
 | Checker | 默认关闭；report 模式只读、只运行一次，不能形成“修复—复查”循环。 |
-| OMP 约束 | 原生运行时门禁执行当前 profile，并把内部熔断上限与 Agent 的证据计划分开。 |
+| OMP 约束 | 原生运行时只硬保护 `V0`、`U0`、路径和 UI driver；checker 选择仍由 Agent 契约执行，更高证据等级是工作指引，不是命令配额。 |
 | Codex 约束 | 项目说明、hooks 与 Codex 自身 sandbox/approval 边界共同携带 profile。 |
 | 上游策略 | 以 Trellis 0.6.16 为独立基线，不承诺继续同步上游。 |
 
@@ -32,15 +32,16 @@ Lite 与官方 Trellis 可以共存，不会互相覆盖。
 
 ## Profile 与验证证据
 
-先选择一个输入快捷方式：
+每个正式任务都选择 P、V、U 与 checker。preset 只是输入快捷方式；每次都会
+展示解析后的四项结果，并允许分别覆盖：
 
 - `quick`：`P0 / V0 / U0 / checker off`。
 - `focused`（推荐）：`P1 / V1 / U0 / checker off`。
 - `release`：`P2 / V3 / U0 / checker off`。
 - `custom`：逐项选择。
 
-preset 本身不会持久化。Trellis 只记录解析后的 P/V/U/checker/driver 与路径
-字段；U 仍可独立覆盖。
+preset 本身不会持久化，也不会跨任务沿用。Trellis 只记录解析后的
+P/V/U/checker/driver 与路径字段；下一个任务仍可重新选择每一项。
 
 `P` 控制允许改什么：
 
@@ -52,47 +53,41 @@ preset 本身不会持久化。Trellis 只记录解析后的 P/V/U/checker/drive
 `V` 同时选择前端和后端代码证据，不授权浏览器/UI 自动化：
 
 - `V0`：延期代码验证。
-- `V1`：针对改动行为或文件运行一个聚焦证据批次。
-- `V2`：只运行预先选定的相关检查，每项一次。
-- `V3`：只运行预先选定的发布就绪清单，每项一次。
+- `V1`：优先针对改动行为或文件运行一个聚焦证据批次。
+- `V2`：运行预先选定的相关检查，并合并兼容的检查。
+- `V3`：运行预先选定的发布就绪清单，不额外制造门禁。
 
 `U` 是独立的浏览器/UI 选择：
 
 - `U0`：延期浏览器、组件行为、截图与 E2E 证据。
-- `U1`：用 Ego Lite 对改动路径做一次聚焦交互。
+- `U1`：优先用 Ego Lite 对改动路径做一次聚焦交互。
 - `U2`：运行选定的用户流程及其相关边界或错误状态。
-- `U3`：只运行预先选定的较广 UI 清单，每条流程一次。
+- `U3`：运行预先选定的较广 UI 清单，不额外增加流程。
 
 即使选择 `V3 + U0`，UI 验证仍然延期；`U1–U3` 也不会自动授权
 Playwright、Cypress 或 Selenium。
 
 Agent 的唯一权威规则是
 [验证合同](./.trellis/workflow.md#verification-contract)。它分别报告已交付实现、
-验证证据、延期证据与发布就绪状态。每项获批检查只运行一次；任何失败后，
-Agent 都先报告并等待用户新的自然语言授权，再修复或复验。OMP 无法判断命令
-是否通过，因此“失败即停并询问”属于 Agent 合同。
+验证证据、延期证据与发布就绪状态。Agent 应先集中完成相关改动，再成批运行有
+价值的证据；验证失败时，可在原范围内自主修复直接相关问题，不需要每个失败都
+询问，也不应重复运行没有新增信息的检查。
 
-OMP 只把数字上限当内部熔断器，未使用余量不是证据目标。熔断触发后，用户可在
-OMP 输入框放行下一条匹配的验证动作：
-
-```text
-/trellis-authorize-verification code
-/trellis-authorize-verification ui
-```
-
-同一时间只能挂起一次放行；消费后，用户可以再次授权。这个命令不能绕过
-`V0`、`U0`、已选 UI driver 或任务已经批准的证据范围，正常的 Agent tool
-loop 也不能直接调用它。
+只有需要产品决策、明显扩大范围、执行高风险副作用、改变 profile，或重复尝试
+已没有实质进展时，Agent 才暂停询问。OMP 不再为 V1–V3 或 U1–U3 设置数字
+上限；它仍会硬阻止 `V0` 下的代码验证、`U0` 下的浏览器/UI 验证、未选择的 UI
+driver，以及超出锁定路径范围的写入。`checker off` 仍是明确的 Agent 契约；若
+report checker 已被派发，OMP 会机械限制它只能使用只读工具。
 
 ## 安装 CLI
 
 需要 Node.js 18.17+、Python 3.9+ 与 pnpm 10。
 
-当前标准安装方式是从 GitHub 的 v1.1.0 tag 构建并链接。安装只创建
+当前标准安装方式是从 GitHub 的 v1.1.1 tag 构建并链接。安装只创建
 `trellis-lite` 和 `tll`，不会覆盖机器上已有的 `trellis`：
 
 ```bash
-git clone --branch v1.1.0 --depth 1 https://github.com/izumi0uu/trellis-lite.git
+git clone --branch v1.1.1 --depth 1 https://github.com/izumi0uu/trellis-lite.git
 cd trellis-lite
 ./scripts/install-cli.sh
 
@@ -110,7 +105,7 @@ workspace，然后用全局 npm link 指向当前 checkout；它不会使用 `su
 npm unlink --global trellis-lite
 ```
 
-npm 包名已确定为 `trellis-lite` 和 `trellis-lite-core`。在 v1.1.0 尚未出现在
+npm 包名已确定为 `trellis-lite` 和 `trellis-lite-core`。在 v1.1.1 尚未出现在
 公共 npm registry 之前，应继续使用 GitHub 安装方式。
 
 ## 初始化项目

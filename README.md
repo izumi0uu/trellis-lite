@@ -3,8 +3,8 @@
 Trellis Lite is an independent, smaller fork of
 [Trellis](https://github.com/mindfold-ai/Trellis). It keeps Trellis's durable
 task, spec, workspace-memory, and update model, but supports only **Codex** and
-**Oh My Pi (OMP)** and puts explicit limits around how coding agents change and
-verify a project.
+**Oh My Pi (OMP)** and gives coding agents a lightweight agreement about change
+scope, evidence depth, and the user's time investment.
 
 This is not the official Mindfold Trellis package. The package and executable
 names are intentionally different, so both projects can be installed on the
@@ -25,7 +25,7 @@ same machine without replacing each other.
 | UI driver | Ego Lite is the default for `U1–U3`. If it is unavailable, the agent reports that instead of installing or silently substituting a tool. |
 | E2E tools | Playwright, Cypress, Selenium, and project E2E suites run only when explicitly selected as the UI driver. |
 | Checker | Off by default. Report mode is read-only, runs once, and cannot enter a fix/recheck loop. |
-| OMP enforcement | Native runtime gates enforce the selected profile and keep internal circuit-breaker ceilings separate from the Agent's evidence plan. |
+| OMP enforcement | Native runtime gates protect explicit `V0`, `U0`, path, and UI-driver choices; checker selection remains an Agent contract, and higher evidence levels remain guidance rather than command quotas. |
 | Codex enforcement | Project instructions, hooks, and the Codex sandbox/approval boundary carry the profile into the task. |
 | Upstream policy | Independent release line based on Trellis 0.6.16; no promise of continued upstream synchronization. |
 
@@ -35,15 +35,17 @@ profile has been recorded.
 
 ## Profiles and verification evidence
 
-Choose a preset as an input shortcut:
+For every durable task, choose P, V, U, and checker. A preset is an input
+shortcut whose resolved values are always shown and may be overridden:
 
 - `quick`: `P0 / V0 / U0 / checker off`.
 - `focused` (recommended): `P1 / V1 / U0 / checker off`.
 - `release`: `P2 / V3 / U0 / checker off`.
 - `custom`: select the individual fields.
 
-Presets are not stored. Trellis records only the resolved P/V/U/checker/driver
-and path fields, and U may be overridden independently.
+Presets are not stored or carried between tasks. Trellis records only the
+resolved P/V/U/checker/driver and path fields, and every field remains available
+for selection on the next task.
 
 `P` controls what may be changed:
 
@@ -58,16 +60,16 @@ and path fields, and U may be overridden independently.
 browser/UI automation:
 
 - `V0`: defer code verification.
-- `V1`: run one focused evidence batch for the changed behavior or file.
-- `V2`: run only the related checks selected in advance, once each.
-- `V3`: run only the selected release-readiness checklist, once each.
+- `V1`: prefer one focused evidence batch for the changed behavior or file.
+- `V2`: run the related checks selected in advance and consolidate compatible checks.
+- `V3`: run the selected release-readiness checklist without inventing extra gates.
 
 `U` is an independent browser/UI decision:
 
 - `U0`: defer browser, component-behavior, screenshot, and E2E evidence.
-- `U1`: one focused Ego Lite interaction on the changed path.
+- `U1`: prefer one focused Ego Lite interaction on the changed path.
 - `U2`: the selected user flow and its relevant boundary or error state.
-- `U3`: only the broader UI checklist selected in advance, once per flow.
+- `U3`: the broader UI checklist selected in advance, without adding flows.
 
 `V3 + U0` still defers UI verification. `U1–U3` do not silently authorize
 Playwright, Cypress, or Selenium.
@@ -75,24 +77,18 @@ Playwright, Cypress, or Selenium.
 The authoritative Agent policy is the
 [Verification contract](./.trellis/workflow.md#verification-contract). It
 separates delivered implementation, verification evidence, deferred evidence,
-and release readiness. Every approved check runs once. After a failure, the
-Agent reports and waits for new natural-language authorization before repair or
-re-verification. This stop-and-ask behavior is an Agent contract because OMP
-cannot infer whether a command passed or failed.
+and release readiness. The Agent completes related edits before checking,
+consolidates useful evidence, and may autonomously repair directly related
+failures within the original scope. It should not ask after each failure or
+repeat checks that provide no new information.
 
-OMP keeps numeric ceilings internal as circuit breakers; unused capacity is not
-an evidence target. If a ceiling fires, the user may release the next matching
-verification action from the OMP prompt:
-
-```text
-/trellis-authorize-verification code
-/trellis-authorize-verification ui
-```
-
-Only one release may be outstanding at a time. After it is consumed, the user
-may authorize another. The command cannot override `V0`, `U0`, the selected UI
-driver, or the evidence already approved for the task, and the normal Agent tool
-loop cannot invoke it directly.
+The Agent pauses only for a product decision, meaningful scope expansion, risky
+side effect, profile change, or when repeated attempts no longer make substantive
+progress. OMP does not impose numeric ceilings on V1–V3 or U1–U3. It still blocks
+code verification at `V0`, browser/UI verification at `U0`, an unselected UI
+driver, and writes outside a locked path boundary. Checker `off` remains an
+explicit Agent boundary; a dispatched report checker is mechanically restricted
+to read-only tools.
 
 ## Install the CLI
 
@@ -103,7 +99,7 @@ the `trellis-lite` and `tll` commands; an existing `trellis` command is left
 untouched.
 
 ```bash
-git clone --branch v1.1.0 --depth 1 https://github.com/izumi0uu/trellis-lite.git
+git clone --branch v1.1.1 --depth 1 https://github.com/izumi0uu/trellis-lite.git
 cd trellis-lite
 ./scripts/install-cli.sh
 
@@ -123,7 +119,7 @@ npm unlink --global trellis-lite
 ```
 
 The npm package names are reserved as `trellis-lite` and
-`trellis-lite-core`, but v1.1.0 should be installed from GitHub until those
+`trellis-lite-core`, but v1.1.1 should be installed from GitHub until those
 packages are visible on the public npm registry.
 
 ## Initialize a project

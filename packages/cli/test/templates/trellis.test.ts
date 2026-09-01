@@ -25,6 +25,26 @@ describe("Trellis Lite core templates", () => {
     expect(workflowMdTemplate).not.toContain("[Gemini, Qoder");
   });
 
+  it("presents every task's P/V/U/checker choices without command quotas", () => {
+    expect(workflowMdTemplate).toContain(
+      "present and resolve P, V, U, and checker for this task",
+    );
+    expect(workflowMdTemplate).toContain(
+      "always show their resolved P/V/U/checker values",
+    );
+    expect(workflowMdTemplate).toContain(
+      "they are not command quotas",
+    );
+    expect(workflowMdTemplate).toContain(
+      "autonomously repair problems that are",
+    );
+    expect(workflowMdTemplate).toMatch(
+      /Do not ask after each file, failure, or\s+repair step/,
+    );
+    expect(workflowMdTemplate).not.toContain("trellis-authorize-verification");
+    expect(workflowMdTemplate).not.toContain("numeric ceilings");
+  });
+
   it("keeps code and browser verification as independent evidence choices", () => {
     expect(workflowMdTemplate).toContain(
       "One V level covers frontend and backend code evidence",

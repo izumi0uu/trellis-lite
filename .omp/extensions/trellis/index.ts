@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, readSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync, readSync } from "node:fs";
 import { join, dirname, basename, isAbsolute, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -323,26 +323,11 @@ interface LiteProfile {
    scope_locked: boolean;
 }
 
-type LiteBudgetBucket = { used: number; extra_remaining: number };
-
 const CHECKER_ALLOWED_TOOLS = new Set(["read", "grep", "glob", "find", "search", "ast_grep", "lsp", "yield"]);
 const LITE_CHANGE_MODES = new Set<LiteChangeMode>(["P0", "P1", "P2", "P3"]);
 const LITE_VERIFICATION_LEVELS = new Set<LiteVerificationLevel>(["V0", "V1", "V2", "V3"]);
 const LITE_UI_LEVELS = new Set<LiteUiVerificationLevel>(["U0", "U1", "U2", "U3"]);
 const LITE_UI_DRIVERS = new Set<LiteUiDriver>(["ego-lite", "playwright", "cypress", "selenium", "project-suite"]);
-const LITE_VERIFICATION_CEILINGS: Readonly<Record<LiteVerificationLevel, number>> = {
-   V0: 0,
-   V1: 1,
-   V2: 3,
-   V3: 8,
-};
-const LITE_UI_VERIFICATION_CEILINGS: Readonly<Record<LiteUiVerificationLevel, number>> = {
-   U0: 0,
-   U1: 1,
-   U2: 1,
-   U3: 3,
-};
-
 function taskContextJsonlNames(agentType?: AgentType): string[] {
    if (agentType === "trellis-implement") return ["implement.jsonl"];
    if (agentType === "trellis-check") return ["check.jsonl"];
@@ -1328,113 +1313,6 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function childRecord(parent: Record<string, unknown>, key: string): Record<string, unknown> | null {
-   const existing = parent[key];
-   if (existing === undefined) {
-      const child: Record<string, unknown> = {};
-      parent[key] = child;
-      return child;
-   }
-   return objectRecord(existing);
-}
-
-function budgetBucket(value: unknown): LiteBudgetBucket | null {
-   if (value === undefined) return { used: 0, extra_remaining: 0 };
-   const record = objectRecord(value);
-   if (!record) return null;
-   const used = record.used ?? 0;
-   const extraRemaining = record.extra_remaining ?? 0;
-   if (typeof used !== "number" || typeof extraRemaining !== "number"
-      || !Number.isInteger(used) || !Number.isInteger(extraRemaining)
-      || used < 0 || extraRemaining < 0 || extraRemaining > 1) return null;
-   return { used, extra_remaining: extraRemaining };
-}
-
-type MutableBudgetState = { path: string; data: Record<string, unknown>; taskBudgets: Record<string, unknown>; bucket: LiteBudgetBucket };
-
-function loadBudgetState(projectRoot: string, contextKey: string, taskRef: string, bucketName: string): MutableBudgetState | null {
-   const ledgerPath = join(projectRoot, ".trellis", ".runtime", "lite-budget", `${contextKey}.json`);
-   let data: Record<string, unknown> = {};
-   if (existsSync(ledgerPath)) {
-      try {
-         const parsed = JSON.parse(readFileSync(ledgerPath, "utf-8")) as unknown;
-         const record = objectRecord(parsed);
-         if (!record) return null;
-         data = record;
-      } catch {
-         return null;
-      }
-   }
-   const taskBudgets = childRecord(data, taskRef);
-   if (!taskBudgets) return null;
-   const bucket = budgetBucket(taskBudgets[bucketName]);
-   return bucket ? { path: ledgerPath, data, taskBudgets, bucket } : null;
-}
-
-let budgetWriteSequence = 0;
-
-function writeBudgetState(ledgerPath: string, data: Record<string, unknown>): boolean {
-   const tempPath = `${ledgerPath}.tmp-${process.pid}-${Date.now()}-${budgetWriteSequence++}`;
-   let descriptor: number | null = null;
-   try {
-      mkdirSync(dirname(ledgerPath), { recursive: true });
-      const mode = existsSync(ledgerPath) ? statSync(ledgerPath).mode : 0o600;
-      descriptor = openSync(tempPath, "wx", mode);
-      writeFileSync(descriptor, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
-      closeSync(descriptor);
-      descriptor = null;
-      renameSync(tempPath, ledgerPath);
-      return true;
-   } catch {
-      if (descriptor !== null) {
-         try { closeSync(descriptor); } catch { /* best effort */ }
-      }
-      try { unlinkSync(tempPath); } catch { /* best effort */ }
-      return false;
-   }
-}
-
-type BudgetRequest = { bucketName: string; ceiling: number; label: string };
-
-function consumeBudgets(
-   projectRoot: string,
-   contextKey: string,
-   taskRef: string,
-   requests: BudgetRequest[],
-): string | null {
-   if (requests.length === 0) return null;
-   for (const request of requests) {
-      if (request.ceiling === 0) {
-         const disposition = request.bucketName.startsWith("code:") ? "defers" : "forbids";
-         return `${request.label} ${disposition} verification; change the Lite profile before running this command`;
-      }
-   }
-   const state = loadBudgetState(projectRoot, contextKey, taskRef, requests[0]!.bucketName);
-   if (!state) return `${requests[0]!.label} verification state is invalid; no verification command was run`;
-   const entries: { request: BudgetRequest; bucket: LiteBudgetBucket; usingExtra: boolean }[] = [];
-   for (const request of requests) {
-      const bucket = budgetBucket(state.taskBudgets[request.bucketName]);
-      if (!bucket) return `${request.label} verification state is invalid; no verification command was run`;
-      const usingExtra = bucket.used >= request.ceiling;
-      if (usingExtra && bucket.extra_remaining === 0) {
-         const kind = request.bucketName.startsWith("code:") ? "code" : "ui";
-         return `${request.label} safety ceiling reached; the user can authorize the next additional verification command with /trellis-authorize-verification ${kind}`;
-      }
-      entries.push({ request, bucket, usingExtra });
-   }
-
-   for (const { request, bucket, usingExtra } of entries) {
-      state.taskBudgets[request.bucketName] = {
-         used: bucket.used + 1,
-         extra_remaining: usingExtra ? bucket.extra_remaining - 1 : bucket.extra_remaining,
-      };
-   }
-   if (!writeBudgetState(state.path, state.data)) {
-      return `${requests.map((request) => request.label).join("/")} verification state could not be persisted; no verification command was run`;
-   }
-   return null;
-}
-
 interface TaskContextCache {
    projectRoot: string;
    taskDir: string;
@@ -1464,69 +1342,6 @@ export default function(pi: ExtensionAPI): void {
       if (!key) return null;
       return key;
    };
-
-   pi.registerCommand("trellis-authorize-verification", {
-      description: "Authorize the next Trellis Lite code or UI verification command after its safety ceiling",
-      handler: (args, ctx) => {
-         const kind = args.trim().toLowerCase();
-         if (kind !== "code" && kind !== "ui") {
-            ctx.ui.notify("Usage: /trellis-authorize-verification code|ui", "warning");
-            return;
-         }
-         if (!projectRoot) projectRoot = findProjectRoot(ctx.cwd);
-         const contextKey = rememberContextKey(ctx);
-         if (!projectRoot || !contextKey) {
-            ctx.ui.notify("Trellis Lite could not resolve this project session; no verification command was authorized.", "error");
-            return;
-         }
-         const state = activeLiteState(projectRoot, contextKey);
-         if (state.recordInvalid) {
-            ctx.ui.notify("Trellis Lite cannot read the active task.json as a JSON object; repair the task record before authorizing verification.", "error");
-            return;
-         }
-         if (state.declared && !state.profile) {
-            ctx.ui.notify("Trellis Lite profile is invalid; repair the profile before authorizing verification.", "error");
-            return;
-         }
-         if (!state.profile || !state.taskRef) {
-            ctx.ui.notify("No active task with a selected Trellis Lite profile was found.", "warning");
-            return;
-         }
-
-         const level = kind === "code" ? state.profile.verification_level : state.profile.ui_verification_level;
-         const ceiling = kind === "code"
-            ? (state.profile.verification_level ? LITE_VERIFICATION_CEILINGS[state.profile.verification_level] : 0)
-            : (state.profile.ui_verification_level ? LITE_UI_VERIFICATION_CEILINGS[state.profile.ui_verification_level] : 0);
-         if (!level || ceiling === 0) {
-            const disposition = kind === "code" ? "defers" : "forbids";
-            ctx.ui.notify(`${level ?? kind} ${disposition} verification; change the Lite profile instead of authorizing an override.`, "warning");
-            return;
-         }
-         const bucketName = kind === "code"
-            ? `code:${level}`
-            : `ui:${level}:${state.profile.ui_driver}`;
-         const budget = loadBudgetState(projectRoot, contextKey, state.taskRef, bucketName);
-         if (!budget) {
-            ctx.ui.notify("Trellis Lite verification state is invalid; no verification command was authorized.", "error");
-            return;
-         }
-         if (budget.bucket.used < ceiling) {
-            ctx.ui.notify(`${level} verification remains available under the current safety ceiling; no override was added.`, "info");
-            return;
-         }
-         if (budget.bucket.extra_remaining === 1) {
-            ctx.ui.notify(`The next additional ${kind} verification command is already authorized.`, "info");
-            return;
-         }
-
-         budget.taskBudgets[bucketName] = { ...budget.bucket, extra_remaining: 1 };
-         if (!writeBudgetState(budget.path, budget.data)) {
-            ctx.ui.notify("Trellis Lite could not persist the authorization; no verification command was authorized.", "error");
-            return;
-         }
-         ctx.ui.notify(`Authorized the next additional ${kind} verification command for the active task.`, "info");
-      },
-   });
 
    const getTaskContext = (taskDir: string, root: string): string => {
       const signature = taskContextSignature(root, taskDir, agentType);
@@ -1728,8 +1543,8 @@ export default function(pi: ExtensionAPI): void {
             };
          }
          if (profile && command && (requestedUiDrivers.size > 0 || requestedCodeVerification)) {
-            if (!contextKey || !state.taskRef) {
-               return { block: true, reason: "Trellis Lite cannot persist this verification state without an active session identity" };
+            if (requestedCodeVerification && profile.verification_level === "V0") {
+               return { block: true, reason: "Trellis Lite V0 defers verification; change the Lite profile before running this command" };
             }
             if (requestedUiDrivers.size > 0) {
                if (profile.ui_verification_level === "U0") {
@@ -1749,19 +1564,6 @@ export default function(pi: ExtensionAPI): void {
                   }
                }
             }
-            const requests: BudgetRequest[] = [];
-            if (requestedCodeVerification) requests.push({
-               bucketName: `code:${profile.verification_level}`,
-               ceiling: profile.verification_level ? LITE_VERIFICATION_CEILINGS[profile.verification_level] : 0,
-               label: profile.verification_level ?? "code verification",
-            });
-            if (requestedUiDrivers.size > 0) requests.push({
-               bucketName: `ui:${profile.ui_verification_level}:${profile.ui_driver}`,
-               ceiling: profile.ui_verification_level ? LITE_UI_VERIFICATION_CEILINGS[profile.ui_verification_level] : 0,
-               label: profile.ui_verification_level ?? "UI verification",
-            });
-            const violation = consumeBudgets(projectRoot, contextKey, state.taskRef, requests);
-            if (violation) return { block: true, reason: `Trellis Lite verification state: ${violation}` };
          }
       }
 

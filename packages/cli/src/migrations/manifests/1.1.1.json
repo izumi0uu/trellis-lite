@@ -1,0 +1,9 @@
+{
+  "version": "1.1.1",
+  "description": "Makes P/V/U/checker a lightweight task agreement and removes repeated verification authorization loops",
+  "breaking": false,
+  "recommendMigrate": false,
+  "changelog": "**Autonomous in-scope convergence:**\n- Keeps P, V, U, and checker selectable for every durable task; presets always show their resolved values and remain individually overridable.\n- Treats P/V/U as the user's preferred scope, evidence depth, and time investment rather than verification command quotas.\n- Lets the Agent collect and repair directly related failures within the original task boundary without asking after every failure or repair step.\n- Removes fixed V/U ceilings, the runtime lite-budget ledger, and /trellis-authorize-verification.\n- Keeps V0, U0, locked paths, selected UI driver, invalid profiles, and report-checker read-only tools as explicit boundaries.\n- Adds no repair policy, retry counter, or replacement verification state machine.",
+  "migrations": [],
+  "notes": "Run trellis-lite update normally; --migrate is not required. Reload or restart an already-running OMP extension after updating, and prefer a new conversation if the old one already contains failure-stop or safety-ceiling instructions. Existing .trellis/.runtime/lite-budget files are ignored and remain protected runtime data."
+}

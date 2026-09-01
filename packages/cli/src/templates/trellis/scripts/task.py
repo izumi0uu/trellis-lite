@@ -15,7 +15,7 @@ Usage:
     python3 task.py set-base-branch <dir> <branch>  # Set PR target branch
     python3 task.py set-scope <dir> <scope>     # Set scope for PR title
     python3 task.py set-meta <dir> <key> <value>  # Set a task metadata key
-    python3 task.py set-lite-profile <dir> [options]  # Set bounded execution policy
+    python3 task.py set-lite-profile <dir> [options]  # Record task-level P/V/U/checker choices
     python3 task.py rename <dir> <new-slug> [--dry-run]  # Rename task + references
     python3 task.py archive <task-dir> [--skip-branch-validation]  # Archive completed task
     python3 task.py list                        # List active tasks
@@ -687,7 +687,7 @@ Usage:
   python3 task.py set-base-branch <dir> <branch>     Set PR target branch
   python3 task.py set-scope <dir> <scope>            Set scope for PR title
   python3 task.py set-meta <dir> <key> <value>       Set/overwrite a task metadata key
-  python3 task.py set-lite-profile <dir> [options]   Set a Lite preset or explicit P/V/U/checker policy
+  python3 task.py set-lite-profile <dir> [options]   Record a Lite preset or explicit P/V/U/checker choices
   python3 task.py rename <dir> <new-slug>            Rename task, identity fields and references
   python3 task.py archive <task-dir>                 Archive completed task
   python3 task.py add-subtask <parent> <child>       Link child task to parent
@@ -872,7 +872,7 @@ def main() -> int:
     # set-lite-profile
     p_lite = subparsers.add_parser(
         "set-lite-profile",
-        help="Record a user-selected Lite preset or explicit P/V/U/checker policy",
+        help="Record a user-selected Lite preset or explicit P/V/U/checker choices",
     )
     p_lite.add_argument("dir", help="Task directory")
     p_lite.add_argument("--preset", choices=LITE_PRESETS)
