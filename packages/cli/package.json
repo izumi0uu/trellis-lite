@@ -1,6 +1,6 @@
 {
   "name": "trellis-lite",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Trellis Lite: a lightweight Codex and OMP workflow with selectable P/V/U evidence preferences",
   "type": "module",
   "main": "./dist/index.js",
