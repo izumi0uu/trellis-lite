@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync, readSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, readSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, dirname, basename, isAbsolute, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -232,12 +232,13 @@ function resolveActiveTaskStatus(
    }
 
    // --- 读取 session 数据 ---
-   let sessionData: Record<string, unknown>;
+   let sessionData: Record<string, unknown> | null;
    try {
-      sessionData = JSON.parse(readFileSync(sessionFilePath, "utf-8"));
+      sessionData = objectRecord(JSON.parse(readFileSync(sessionFilePath, "utf-8")));
    } catch {
       return { status: "no_task", taskDir: null, taskTitle: null };
    }
+   if (!sessionData) return { status: "no_task", taskDir: null, taskTitle: null };
 
    const currentTask = sessionData.current_task;
    if (typeof currentTask !== "string" || !currentTask)
@@ -248,17 +249,21 @@ function resolveActiveTaskStatus(
    // written before that fix can still hold one, and `trellis-lite update` does not
    // rewrite session files — so a poisoned pointer outlives the upgrade that
    // closed the writer.
-   const taskDir = resolveProjectFile(projectRoot, currentTask, resolveTrustedRoots(projectRoot));
+   const taskDir = resolveProjectFile(projectRoot, normalizeTaskRef(currentTask) ?? currentTask, resolveTrustedRoots(projectRoot));
    if (!taskDir) return { status: "no_task", taskDir: null, taskTitle: null };
    const taskJsonPath = join(taskDir, "task.json");
    if (!existsSync(taskJsonPath)) return { status: "no_task", taskDir: null, taskTitle: null };
 
-   let taskData: Record<string, unknown>;
+   let taskData: Record<string, unknown> | null;
    try {
-      taskData = JSON.parse(readFileSync(taskJsonPath, "utf-8"));
+      taskData = objectRecord(JSON.parse(readFileSync(taskJsonPath, "utf-8")));
    } catch {
-      return { status: "no_task", taskDir: null, taskTitle: null };
+      taskData = null;
    }
+
+   // Keep the resolved task identity when task.json is damaged. This lets the
+   // Lite profile path fail closed instead of silently becoming "no task".
+   if (!taskData) return { status: "planning", taskDir, taskTitle: null };
 
    return {
       status: typeof taskData.status === "string" ? taskData.status : "planning",
@@ -316,15 +321,27 @@ interface LiteProfile {
    allowed_paths: string[];
    forbidden_paths: string[];
    scope_locked: boolean;
-   max_verification_passes: number;
-   max_ui_verification_passes: number;
 }
+
+type LiteBudgetBucket = { used: number; extra_remaining: number };
 
 const CHECKER_ALLOWED_TOOLS = new Set(["read", "grep", "glob", "find", "search", "ast_grep", "lsp", "yield"]);
 const LITE_CHANGE_MODES = new Set<LiteChangeMode>(["P0", "P1", "P2", "P3"]);
 const LITE_VERIFICATION_LEVELS = new Set<LiteVerificationLevel>(["V0", "V1", "V2", "V3"]);
 const LITE_UI_LEVELS = new Set<LiteUiVerificationLevel>(["U0", "U1", "U2", "U3"]);
 const LITE_UI_DRIVERS = new Set<LiteUiDriver>(["ego-lite", "playwright", "cypress", "selenium", "project-suite"]);
+const LITE_VERIFICATION_CEILINGS: Readonly<Record<LiteVerificationLevel, number>> = {
+   V0: 0,
+   V1: 1,
+   V2: 3,
+   V3: 8,
+};
+const LITE_UI_VERIFICATION_CEILINGS: Readonly<Record<LiteUiVerificationLevel, number>> = {
+   U0: 0,
+   U1: 1,
+   U2: 1,
+   U3: 3,
+};
 
 function taskContextJsonlNames(agentType?: AgentType): string[] {
    if (agentType === "trellis-implement") return ["implement.jsonl"];
@@ -349,7 +366,6 @@ function liteProfileFromTask(taskData: Record<string, unknown>): LiteProfile {
          status: "unselected", change_mode: null, verification_level: null,
          ui_verification_level: null, checker: "off", ui_driver: "ego-lite",
          allowed_paths: [], forbidden_paths: [], scope_locked: false,
-         max_verification_passes: 0, max_ui_verification_passes: 0,
       };
    }
    const profile = raw as Record<string, unknown>;
@@ -359,32 +375,31 @@ function liteProfileFromTask(taskData: Record<string, unknown>): LiteProfile {
       ? profile.verification_level as LiteVerificationLevel : null;
    const uiLevel = typeof profile.ui_verification_level === "string" && LITE_UI_LEVELS.has(profile.ui_verification_level as LiteUiVerificationLevel)
       ? profile.ui_verification_level as LiteUiVerificationLevel : null;
-   const uiDriver = typeof profile.ui_driver === "string" && LITE_UI_DRIVERS.has(profile.ui_driver as LiteUiDriver)
-      ? profile.ui_driver as LiteUiDriver : "ego-lite";
-   const defaultPasses = verificationLevel === "V0" ? 0 : verificationLevel === "V1" ? 1 : verificationLevel === "V2" ? 3 : 8;
-   const defaultUiPasses = uiLevel === "U0" ? 0 : uiLevel === "U1" || uiLevel === "U2" ? 1 : 3;
-   const requestedPasses = typeof profile.max_verification_passes === "number" && Number.isInteger(profile.max_verification_passes)
-      ? Math.max(0, Math.min(8, profile.max_verification_passes)) : defaultPasses;
-   const requestedUiPasses = typeof profile.max_ui_verification_passes === "number" && Number.isInteger(profile.max_ui_verification_passes)
-      ? Math.max(0, Math.min(3, profile.max_ui_verification_passes)) : defaultUiPasses;
+   const uiDriverValid = typeof profile.ui_driver === "string" && LITE_UI_DRIVERS.has(profile.ui_driver as LiteUiDriver);
+   const uiDriver = uiDriverValid ? profile.ui_driver as LiteUiDriver : "ego-lite";
+   const checkerValid = profile.checker === "off" || profile.checker === "report";
+   const checker = checkerValid ? profile.checker as "off" | "report" : "off";
+   const pathsValid = [profile.allowed_paths, profile.forbidden_paths].every((value) =>
+      Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim().length > 0));
    const valid = changeMode !== null
       && verificationLevel !== null
       && uiLevel !== null
+      && uiDriverValid
+      && checkerValid
+      && typeof profile.selected_by === "string"
+      && profile.selected_by.trim().length > 0
       && profile.scope_locked === true
-      && Array.isArray(profile.allowed_paths)
-      && Array.isArray(profile.forbidden_paths);
+      && pathsValid;
    return {
       status: valid ? "selected" : "invalid",
       change_mode: changeMode,
       verification_level: verificationLevel,
       ui_verification_level: uiLevel,
-      checker: profile.checker === "report" ? "report" : "off",
+      checker,
       ui_driver: uiDriver,
       allowed_paths: boundedStringArray(profile.allowed_paths),
       forbidden_paths: boundedStringArray(profile.forbidden_paths),
       scope_locked: profile.scope_locked === true,
-      max_verification_passes: requestedPasses,
-      max_ui_verification_passes: requestedUiPasses,
    };
 }
 
@@ -963,16 +978,41 @@ function detectAgentType(): AgentType {
    return null;
 }
 
-function activeLiteState(projectRoot: string, contextKey: string | null): { declared: boolean; profile: LiteProfile | null } {
-   const active = resolveActiveTaskStatus(projectRoot, contextKey);
-   if (!active.taskDir) return { declared: false, profile: null };
+function normalizeTaskRef(raw: unknown): string | null {
+   if (typeof raw !== "string") return null;
+   let normalized = raw.trim().replaceAll("\\", "/").replace(/^\.\//, "");
+   if (normalized.startsWith("tasks/")) normalized = `.trellis/${normalized}`;
+   return normalized || null;
+}
+
+function canonicalTaskRef(projectRoot: string, taskDir: string): string | null {
    try {
-      const taskData = JSON.parse(readFileSync(join(active.taskDir, "task.json"), "utf-8")) as Record<string, unknown>;
+      const root = realpathSync(projectRoot);
+      const task = realpathSync(taskDir);
+      const taskRelative = relative(root, task).replaceAll("\\", "/");
+      return isInsideRoot(root, task) ? taskRelative : `trusted:${hashValue(task)}`;
+   } catch {
+      return null;
+   }
+}
+
+function activeLiteState(projectRoot: string, contextKey: string | null): {
+   declared: boolean;
+   profile: LiteProfile | null;
+   taskRef: string | null;
+   recordInvalid: boolean;
+} {
+   const active = resolveActiveTaskStatus(projectRoot, contextKey);
+   if (!active.taskDir) return { declared: false, profile: null, taskRef: null, recordInvalid: false };
+   const taskRef = canonicalTaskRef(projectRoot, active.taskDir);
+   try {
+      const taskData = objectRecord(JSON.parse(readFileSync(join(active.taskDir, "task.json"), "utf-8")));
+      if (!taskData) return { declared: true, profile: null, taskRef, recordInvalid: true };
       const declared = Object.prototype.hasOwnProperty.call(taskData, "lite");
       const profile = liteProfileFromTask(taskData);
-      return { declared, profile: profile.status === "selected" ? profile : null };
+      return { declared, profile: profile.status === "selected" ? profile : null, taskRef, recordInvalid: false };
    } catch {
-      return { declared: false, profile: null };
+      return { declared: true, profile: null, taskRef, recordInvalid: true };
    }
 }
 
@@ -1029,23 +1069,369 @@ function toolCommand(input: unknown): string {
    return "";
 }
 
-function uiDriverForCommand(command: string): LiteUiDriver | null {
-   if (/\bego-browser\b/i.test(command)) return "ego-lite";
-   if (/\bplaywright\b/i.test(command)) return "playwright";
-   if (/\bcypress\b/i.test(command)) return "cypress";
-   if (/\bselenium\b|\bwebdriver\b/i.test(command)) return "selenium";
-   if (/\b(?:e2e|browser[-_: ]?test|test:ui|ui[-_: ]?test)\b/i.test(command)) return "project-suite";
+function shellWords(segment: string): string[] {
+   return segment.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g)?.map((word) => {
+      const trimmed = word.replace(/^[({]+/, "").replace(/[)}]+$/, "");
+      if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+         return trimmed.slice(1, -1);
+      }
+      return trimmed;
+   }).filter(Boolean) ?? [];
+}
+
+function commandInvocations(command: string): string[][] {
+   const segments: string[] = [];
+   let current = "";
+   let quote: "'" | '"' | null = null;
+   let escaped = false;
+   for (const char of command) {
+      if (escaped) {
+         current += char;
+         escaped = false;
+         continue;
+      }
+      if (char === "\\" && quote !== "'") {
+         current += char;
+         escaped = true;
+         continue;
+      }
+      if (quote) {
+         current += char;
+         if (char === quote) quote = null;
+         continue;
+      }
+      if (char === "'" || char === '"') {
+         quote = char;
+         current += char;
+         continue;
+      }
+      if (char === ";" || char === "|" || char === "&" || char === "\n" || char === "(" || char === ")") {
+         if (current.trim()) segments.push(current);
+         current = "";
+         continue;
+      }
+      current += char;
+   }
+   if (current.trim()) segments.push(current);
+   return segments.map(shellWords).filter((words) => words.length > 0);
+}
+
+function executableIndex(words: string[]): number {
+   let index = 0;
+   while (index < words.length) {
+      const word = words[index]!;
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || word === "!" || word === "(") {
+         index += 1;
+         continue;
+      }
+      const executable = basename(word).toLowerCase();
+      if (["command", "nohup", "sudo", "time"].includes(executable)) {
+         index += 1;
+         while (index < words.length && words[index]!.startsWith("-")) index += 1;
+         continue;
+      }
+      if (executable === "env") {
+         index += 1;
+         while (index < words.length && (words[index]!.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]!))) index += 1;
+         continue;
+      }
+      break;
+   }
+   return index;
+}
+
+function firstArgument(words: string[], start: number): string | null {
+   for (let index = start; index < words.length; index += 1) {
+      const word = words[index]!;
+      if (!word.startsWith("-") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) return word;
+   }
    return null;
 }
 
-function verificationCommand(command: string): boolean {
-   return /\b(?:test|tests|pytest|jest|vitest|mocha|lint|eslint|ruff|flake8|pylint|stylelint|typecheck|type-check|tsc|pyright|basedpyright|mypy|build|compile|pack|bundle|integration|smoke)\b/i.test(command);
+function runnerArgument(words: string[], executableAt: number, marker: string): string | null {
+   const markerAt = words.findIndex((word, index) => index > executableAt && word.toLowerCase() === marker);
+   return markerAt === -1 ? null : firstArgument(words, markerAt + 1);
 }
 
-function consumeBudget(calls: Map<string, number>, key: string, maximum: number, label: string): string | null {
-   const used = calls.get(key) ?? 0;
-   if (used >= maximum) return `${label} budget exhausted; ask the user before running another verification pass`;
-   calls.set(key, used + 1);
+function scriptNameMatches(word: string | null, pattern: RegExp): boolean {
+   if (!word) return false;
+   return pattern.test(basename(word).replace(/\.(?:cmd|ps1|py|sh|ts|js)$/i, ""));
+}
+
+const VERIFICATION_SCRIPT_NAME = /(?:^|[-_.])(?:test|tests|lint|typecheck|type-check|build|compile|pack|bundle|integration|smoke)(?:$|[:._-])/i;
+const UI_SCRIPT_NAME = /^(?:e2e|browser[-_:]?test|test[-_:]?(?:ui|browser|e2e)|ui[-_:]?test)(?:$|[:._-])/i;
+const VERIFICATION_EXECUTABLES = new Set([
+   "pytest", "py.test", "py_compile", "compileall", "jest", "vitest", "mocha", "ava", "tap", "tox", "nox",
+   "eslint", "ruff", "flake8", "pylint", "stylelint", "biome",
+   "tsc", "pyright", "basedpyright", "mypy",
+   "webpack", "rollup", "tsup", "esbuild",
+]);
+const VERIFICATION_SUBCOMMANDS: Record<string, Set<string>> = {
+   go: new Set(["test", "vet", "build"]),
+   cargo: new Set(["test", "check", "build", "clippy"]),
+   dotnet: new Set(["test", "build", "pack"]),
+   mvn: new Set(["test", "verify", "package", "compile"]),
+   mvnw: new Set(["test", "verify", "package", "compile"]),
+   gradle: new Set(["test", "check", "build", "assemble"]),
+   gradlew: new Set(["test", "check", "build", "assemble"]),
+};
+const PYTHON_EXECUTABLE = /^(?:python|python\d+(?:\.\d+)?|pypy\d*)$/;
+const PYTHON_VERIFICATION_MODULES = new Set(["pytest", "unittest", "py_compile", "compileall", "mypy", "ruff"]);
+
+function nestedRunnerExecutable(words: string[], executableAt: number): string | null {
+   const executable = basename(words[executableAt] ?? "").toLowerCase();
+   if (["npx", "bunx"].includes(executable)) return firstArgument(words, executableAt + 1);
+   if (["uv", "poetry", "pipenv", "hatch"].includes(executable)) {
+      return runnerArgument(words, executableAt, "run");
+   }
+   if (["npm", "pnpm", "yarn", "bun"].includes(executable)) {
+      const execArgument = runnerArgument(words, executableAt, "exec") ?? runnerArgument(words, executableAt, "dlx");
+      if (execArgument) return execArgument;
+   }
+   return null;
+}
+
+function packageScriptArgument(words: string[], executableAt: number): string | null {
+   const executable = basename(words[executableAt] ?? "").toLowerCase();
+   const optionsWithValue = executable === "pnpm"
+      ? new Set(["--filter", "-f", "--dir", "-c"])
+      : executable === "npm"
+         ? new Set(["--workspace", "-w", "--prefix"])
+         : new Set<string>();
+   let index = executableAt + 1;
+   let afterRun = false;
+   while (index < words.length) {
+      const word = words[index]!;
+      const lower = word.toLowerCase();
+      if (optionsWithValue.has(lower)) {
+         index += 2;
+         continue;
+      }
+      if (word.startsWith("-")) {
+         index += 1;
+         continue;
+      }
+      if (!afterRun && lower === "run") {
+         afterRun = true;
+         index += 1;
+         continue;
+      }
+      if (!afterRun && (lower === "exec" || lower === "dlx")) return null;
+      return word;
+   }
+   return null;
+}
+
+function shellCommandArgument(words: string[], executableAt: number): string | null {
+   for (let index = executableAt + 1; index < words.length - 1; index += 1) {
+      if (/^-[^-]*c[^-]*$/.test(words[index]!)) return words[index + 1] ?? null;
+   }
+   return null;
+}
+
+function pythonVerification(words: string[], pythonAt: number): boolean {
+   const moduleAt = words.findIndex((word, index) => index > pythonAt && word === "-m");
+   if (moduleAt !== -1) return PYTHON_VERIFICATION_MODULES.has(words[moduleAt + 1]?.toLowerCase() ?? "");
+   const script = firstArgument(words, pythonAt + 1);
+   if (scriptNameMatches(script, VERIFICATION_SCRIPT_NAME)) return true;
+   const directories = script?.replaceAll("\\", "/").split("/").slice(0, -1) ?? [];
+   return directories.some((part) => part === "test" || part === "tests");
+}
+
+function projectSuiteUiVerification(words: string[], executableAt: number, candidate: string): boolean {
+   const argumentsAfterRunner = words.slice(executableAt + 1).map((word) => word.toLowerCase().replaceAll("\\", "/"));
+   if (candidate === "vitest") {
+      const browserEnabled = argumentsAfterRunner.some((word) => {
+         if (word === "--browser" || word === "--browser.enabled") return true;
+         const match = /^--browser(?:\.enabled)?=(.+)$/.exec(word);
+         return Boolean(match && !["false", "no", "0"].includes(match[1]!));
+      });
+      if (browserEnabled) return true;
+   }
+   const pythonModuleAt = argumentsAfterRunner.findIndex((word) => word === "-m");
+   const isPytest = ["pytest", "py.test"].includes(candidate)
+      || (PYTHON_EXECUTABLE.test(candidate) && ["pytest", "py.test"].includes(argumentsAfterRunner[pythonModuleAt + 1] ?? ""));
+   if (!isPytest) return false;
+   return argumentsAfterRunner.some((word) =>
+      !word.startsWith("-") && word.includes("/") && word.split("/").some((segment) => segment === "e2e")
+   );
+}
+
+type CommandClassification = { code: boolean; uiDrivers: Set<LiteUiDriver> };
+
+function classifyInvocation(words: string[]): CommandClassification {
+   const result: CommandClassification = { code: false, uiDrivers: new Set<LiteUiDriver>() };
+   const executableAt = executableIndex(words);
+   const executable = basename(words[executableAt] ?? "").toLowerCase();
+   if (!executable) return result;
+
+   if (["bash", "sh", "zsh"].includes(executable)) {
+      const nestedCommand = shellCommandArgument(words, executableAt);
+      if (nestedCommand) return classifyCommand(nestedCommand);
+   }
+
+   const nestedWord = nestedRunnerExecutable(words, executableAt);
+   const nested = basename(nestedWord ?? "").toLowerCase();
+   const candidate = nested || executable;
+   if (candidate === "ego-browser") result.uiDrivers.add("ego-lite");
+   else if (candidate === "playwright") result.uiDrivers.add("playwright");
+   else if (candidate === "cypress") result.uiDrivers.add("cypress");
+   else if (["selenium", "selenium-side-runner", "webdriver"].includes(candidate)) result.uiDrivers.add("selenium");
+
+   let script: string | null = null;
+   if (["npm", "pnpm", "yarn", "bun"].includes(executable)) {
+      script = packageScriptArgument(words, executableAt);
+      if (scriptNameMatches(script, UI_SCRIPT_NAME)) result.uiDrivers.add("project-suite");
+   } else if (["make", "just", "bash", "sh", "zsh"].includes(executable)) {
+      script = firstArgument(words, executableAt + 1);
+      if (scriptNameMatches(script, UI_SCRIPT_NAME)) result.uiDrivers.add("project-suite");
+   }
+   if (result.uiDrivers.size > 0) return result;
+
+   if (VERIFICATION_EXECUTABLES.has(candidate)
+      || scriptNameMatches(nestedWord ?? words[executableAt] ?? null, VERIFICATION_SCRIPT_NAME)) result.code = true;
+   else if (candidate === "vite") {
+      const candidateAt = nested
+         ? words.findIndex((word, index) => index > executableAt && basename(word).toLowerCase() === "vite")
+         : executableAt;
+      result.code = candidateAt !== -1 && firstArgument(words, candidateAt + 1)?.toLowerCase() === "build";
+   } else if (PYTHON_EXECUTABLE.test(candidate)) {
+      const pythonAt = nested
+         ? words.findIndex((word, index) => index > executableAt && basename(word).toLowerCase() === nested)
+         : executableAt;
+      result.code = pythonAt !== -1 && pythonVerification(words, pythonAt);
+   } else if (executable === "node") result.code = words.slice(executableAt + 1).includes("--check");
+   else if (scriptNameMatches(script, VERIFICATION_SCRIPT_NAME)) result.code = true;
+   else {
+      const knownSubcommands = VERIFICATION_SUBCOMMANDS[executable];
+      const subcommand = firstArgument(words, executableAt + 1)?.toLowerCase().split(":").at(-1) ?? "";
+      result.code = knownSubcommands?.has(subcommand) ?? false;
+   }
+   if (result.code && projectSuiteUiVerification(words, executableAt, candidate)) {
+      result.code = false;
+      result.uiDrivers.add("project-suite");
+   }
+   return result;
+}
+
+function classifyCommand(command: string): CommandClassification {
+   const combined: CommandClassification = { code: false, uiDrivers: new Set<LiteUiDriver>() };
+   for (const words of commandInvocations(command)) {
+      const current = classifyInvocation(words);
+      combined.code ||= current.code;
+      for (const driver of current.uiDrivers) combined.uiDrivers.add(driver);
+   }
+   return combined;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function childRecord(parent: Record<string, unknown>, key: string): Record<string, unknown> | null {
+   const existing = parent[key];
+   if (existing === undefined) {
+      const child: Record<string, unknown> = {};
+      parent[key] = child;
+      return child;
+   }
+   return objectRecord(existing);
+}
+
+function budgetBucket(value: unknown): LiteBudgetBucket | null {
+   if (value === undefined) return { used: 0, extra_remaining: 0 };
+   const record = objectRecord(value);
+   if (!record) return null;
+   const used = record.used ?? 0;
+   const extraRemaining = record.extra_remaining ?? 0;
+   if (typeof used !== "number" || typeof extraRemaining !== "number"
+      || !Number.isInteger(used) || !Number.isInteger(extraRemaining)
+      || used < 0 || extraRemaining < 0 || extraRemaining > 1) return null;
+   return { used, extra_remaining: extraRemaining };
+}
+
+type MutableBudgetState = { path: string; data: Record<string, unknown>; taskBudgets: Record<string, unknown>; bucket: LiteBudgetBucket };
+
+function loadBudgetState(projectRoot: string, contextKey: string, taskRef: string, bucketName: string): MutableBudgetState | null {
+   const ledgerPath = join(projectRoot, ".trellis", ".runtime", "lite-budget", `${contextKey}.json`);
+   let data: Record<string, unknown> = {};
+   if (existsSync(ledgerPath)) {
+      try {
+         const parsed = JSON.parse(readFileSync(ledgerPath, "utf-8")) as unknown;
+         const record = objectRecord(parsed);
+         if (!record) return null;
+         data = record;
+      } catch {
+         return null;
+      }
+   }
+   const taskBudgets = childRecord(data, taskRef);
+   if (!taskBudgets) return null;
+   const bucket = budgetBucket(taskBudgets[bucketName]);
+   return bucket ? { path: ledgerPath, data, taskBudgets, bucket } : null;
+}
+
+let budgetWriteSequence = 0;
+
+function writeBudgetState(ledgerPath: string, data: Record<string, unknown>): boolean {
+   const tempPath = `${ledgerPath}.tmp-${process.pid}-${Date.now()}-${budgetWriteSequence++}`;
+   let descriptor: number | null = null;
+   try {
+      mkdirSync(dirname(ledgerPath), { recursive: true });
+      const mode = existsSync(ledgerPath) ? statSync(ledgerPath).mode : 0o600;
+      descriptor = openSync(tempPath, "wx", mode);
+      writeFileSync(descriptor, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
+      closeSync(descriptor);
+      descriptor = null;
+      renameSync(tempPath, ledgerPath);
+      return true;
+   } catch {
+      if (descriptor !== null) {
+         try { closeSync(descriptor); } catch { /* best effort */ }
+      }
+      try { unlinkSync(tempPath); } catch { /* best effort */ }
+      return false;
+   }
+}
+
+type BudgetRequest = { bucketName: string; ceiling: number; label: string };
+
+function consumeBudgets(
+   projectRoot: string,
+   contextKey: string,
+   taskRef: string,
+   requests: BudgetRequest[],
+): string | null {
+   if (requests.length === 0) return null;
+   for (const request of requests) {
+      if (request.ceiling === 0) {
+         const disposition = request.bucketName.startsWith("code:") ? "defers" : "forbids";
+         return `${request.label} ${disposition} verification; change the Lite profile before running this command`;
+      }
+   }
+   const state = loadBudgetState(projectRoot, contextKey, taskRef, requests[0]!.bucketName);
+   if (!state) return `${requests[0]!.label} verification state is invalid; no verification command was run`;
+   const entries: { request: BudgetRequest; bucket: LiteBudgetBucket; usingExtra: boolean }[] = [];
+   for (const request of requests) {
+      const bucket = budgetBucket(state.taskBudgets[request.bucketName]);
+      if (!bucket) return `${request.label} verification state is invalid; no verification command was run`;
+      const usingExtra = bucket.used >= request.ceiling;
+      if (usingExtra && bucket.extra_remaining === 0) {
+         const kind = request.bucketName.startsWith("code:") ? "code" : "ui";
+         return `${request.label} safety ceiling reached; the user can authorize the next additional verification command with /trellis-authorize-verification ${kind}`;
+      }
+      entries.push({ request, bucket, usingExtra });
+   }
+
+   for (const { request, bucket, usingExtra } of entries) {
+      state.taskBudgets[request.bucketName] = {
+         used: bucket.used + 1,
+         extra_remaining: usingExtra ? bucket.extra_remaining - 1 : bucket.extra_remaining,
+      };
+   }
+   if (!writeBudgetState(state.path, state.data)) {
+      return `${requests.map((request) => request.label).join("/")} verification state could not be persisted; no verification command was run`;
+   }
    return null;
 }
 
@@ -1072,14 +1458,75 @@ export default function(pi: ExtensionAPI): void {
    // compaction has occurred since last injection.
    let lastCompactionTs = 0;
    let lastInjectionTs = 0;
-   const verificationCalls = new Map<string, number>();
-   const uiVerificationCalls = new Map<string, number>();
 
    const rememberContextKey = (ctx?: { sessionManager?: { getSessionId?: () => string | undefined; getSessionFile?: () => string | undefined } }): string | null => {
       const key = deriveContextKey(ctx);
       if (!key) return null;
       return key;
    };
+
+   pi.registerCommand("trellis-authorize-verification", {
+      description: "Authorize the next Trellis Lite code or UI verification command after its safety ceiling",
+      handler: (args, ctx) => {
+         const kind = args.trim().toLowerCase();
+         if (kind !== "code" && kind !== "ui") {
+            ctx.ui.notify("Usage: /trellis-authorize-verification code|ui", "warning");
+            return;
+         }
+         if (!projectRoot) projectRoot = findProjectRoot(ctx.cwd);
+         const contextKey = rememberContextKey(ctx);
+         if (!projectRoot || !contextKey) {
+            ctx.ui.notify("Trellis Lite could not resolve this project session; no verification command was authorized.", "error");
+            return;
+         }
+         const state = activeLiteState(projectRoot, contextKey);
+         if (state.recordInvalid) {
+            ctx.ui.notify("Trellis Lite cannot read the active task.json as a JSON object; repair the task record before authorizing verification.", "error");
+            return;
+         }
+         if (state.declared && !state.profile) {
+            ctx.ui.notify("Trellis Lite profile is invalid; repair the profile before authorizing verification.", "error");
+            return;
+         }
+         if (!state.profile || !state.taskRef) {
+            ctx.ui.notify("No active task with a selected Trellis Lite profile was found.", "warning");
+            return;
+         }
+
+         const level = kind === "code" ? state.profile.verification_level : state.profile.ui_verification_level;
+         const ceiling = kind === "code"
+            ? (state.profile.verification_level ? LITE_VERIFICATION_CEILINGS[state.profile.verification_level] : 0)
+            : (state.profile.ui_verification_level ? LITE_UI_VERIFICATION_CEILINGS[state.profile.ui_verification_level] : 0);
+         if (!level || ceiling === 0) {
+            const disposition = kind === "code" ? "defers" : "forbids";
+            ctx.ui.notify(`${level ?? kind} ${disposition} verification; change the Lite profile instead of authorizing an override.`, "warning");
+            return;
+         }
+         const bucketName = kind === "code"
+            ? `code:${level}`
+            : `ui:${level}:${state.profile.ui_driver}`;
+         const budget = loadBudgetState(projectRoot, contextKey, state.taskRef, bucketName);
+         if (!budget) {
+            ctx.ui.notify("Trellis Lite verification state is invalid; no verification command was authorized.", "error");
+            return;
+         }
+         if (budget.bucket.used < ceiling) {
+            ctx.ui.notify(`${level} verification remains available under the current safety ceiling; no override was added.`, "info");
+            return;
+         }
+         if (budget.bucket.extra_remaining === 1) {
+            ctx.ui.notify(`The next additional ${kind} verification command is already authorized.`, "info");
+            return;
+         }
+
+         budget.taskBudgets[bucketName] = { ...budget.bucket, extra_remaining: 1 };
+         if (!writeBudgetState(budget.path, budget.data)) {
+            ctx.ui.notify("Trellis Lite could not persist the authorization; no verification command was authorized.", "error");
+            return;
+         }
+         ctx.ui.notify(`Authorized the next additional ${kind} verification command for the active task.`, "info");
+      },
+   });
 
    const getTaskContext = (taskDir: string, root: string): string => {
       const signature = taskContextSignature(root, taskDir, agentType);
@@ -1239,6 +1686,7 @@ export default function(pi: ExtensionAPI): void {
    });
 
    pi.on("tool_call", (event, ctx) => {
+      if (!projectRoot && typeof ctx?.cwd === "string") projectRoot = findProjectRoot(ctx.cwd);
       const contextKey = rememberContextKey(ctx);
       if (agentType === "trellis-check" && !CHECKER_ALLOWED_TOOLS.has(event.toolName)) {
          return { block: true, reason: `Trellis Lite checker blocked non-inspection tool: ${event.toolName}` };
@@ -1246,6 +1694,9 @@ export default function(pi: ExtensionAPI): void {
 
       if (projectRoot && ["write", "edit", "apply_patch"].includes(event.toolName)) {
          const state = activeLiteState(projectRoot, contextKey);
+         if (state.recordInvalid) {
+            return { block: true, reason: "Trellis Lite cannot read the active task.json as a JSON object; repair the task record before editing" };
+         }
          if (state.declared && !state.profile) {
             return { block: true, reason: "Trellis Lite profile is invalid; ask the user to select P/V/U/checker levels before editing" };
          }
@@ -1259,16 +1710,36 @@ export default function(pi: ExtensionAPI): void {
          const state = activeLiteState(projectRoot, contextKey);
          const profile = state.profile;
          const command = toolCommand(event.input);
-         if (profile && contextKey && command) {
-            const requestedUiDriver = uiDriverForCommand(command);
-            if (requestedUiDriver) {
+         const classification = command
+            ? classifyCommand(command)
+            : { code: false, uiDrivers: new Set<LiteUiDriver>() };
+         const requestedUiDrivers = classification.uiDrivers;
+         const requestedCodeVerification = classification.code;
+         if (state.recordInvalid && (requestedUiDrivers.size > 0 || requestedCodeVerification)) {
+            return {
+               block: true,
+               reason: "Trellis Lite cannot read the active task.json as a JSON object; repair the task record before running code or UI verification",
+            };
+         }
+         if (state.declared && !profile && (requestedUiDrivers.size > 0 || requestedCodeVerification)) {
+            return {
+               block: true,
+               reason: "Trellis Lite profile is invalid; repair it with task.py set-lite-profile before running code or UI verification",
+            };
+         }
+         if (profile && command && (requestedUiDrivers.size > 0 || requestedCodeVerification)) {
+            if (!contextKey || !state.taskRef) {
+               return { block: true, reason: "Trellis Lite cannot persist this verification state without an active session identity" };
+            }
+            if (requestedUiDrivers.size > 0) {
                if (profile.ui_verification_level === "U0") {
                   return { block: true, reason: "Trellis Lite U0 forbids browser/UI verification, including driver availability checks" };
                }
-               if (requestedUiDriver !== profile.ui_driver) {
+               const mismatchedDrivers = [...requestedUiDrivers].filter((driver) => driver !== profile.ui_driver);
+               if (mismatchedDrivers.length > 0) {
                   return {
                      block: true,
-                     reason: `Trellis Lite ${profile.ui_verification_level} selected ${profile.ui_driver}; ${requestedUiDriver} requires explicit user authorization`,
+                     reason: `Trellis Lite ${profile.ui_verification_level} selected ${profile.ui_driver}; change the Lite profile before using ${mismatchedDrivers.join(", ")}`,
                   };
                }
                if (profile.ui_driver === "ego-lite") {
@@ -1277,22 +1748,20 @@ export default function(pi: ExtensionAPI): void {
                      return { block: true, reason: "Ego Lite is not available. Tell the user immediately; do not install it or fall back to Playwright, Cypress, or Selenium." };
                   }
                }
-               const violation = consumeBudget(
-                  uiVerificationCalls,
-                  `${contextKey}:${profile.ui_verification_level}:${profile.ui_driver}`,
-                  profile.max_ui_verification_passes,
-                  profile.ui_verification_level ?? "UI verification",
-               );
-               if (violation) return { block: true, reason: `Trellis Lite UI boundary: ${violation}` };
-            } else if (verificationCommand(command)) {
-               const violation = consumeBudget(
-                  verificationCalls,
-                  `${contextKey}:${profile.verification_level}`,
-                  profile.max_verification_passes,
-                  profile.verification_level ?? "verification",
-               );
-               if (violation) return { block: true, reason: `Trellis Lite code verification boundary: ${violation}` };
             }
+            const requests: BudgetRequest[] = [];
+            if (requestedCodeVerification) requests.push({
+               bucketName: `code:${profile.verification_level}`,
+               ceiling: profile.verification_level ? LITE_VERIFICATION_CEILINGS[profile.verification_level] : 0,
+               label: profile.verification_level ?? "code verification",
+            });
+            if (requestedUiDrivers.size > 0) requests.push({
+               bucketName: `ui:${profile.ui_verification_level}:${profile.ui_driver}`,
+               ceiling: profile.ui_verification_level ? LITE_UI_VERIFICATION_CEILINGS[profile.ui_verification_level] : 0,
+               label: profile.ui_verification_level ?? "UI verification",
+            });
+            const violation = consumeBudgets(projectRoot, contextKey, state.taskRef, requests);
+            if (violation) return { block: true, reason: `Trellis Lite verification state: ${violation}` };
          }
       }
 

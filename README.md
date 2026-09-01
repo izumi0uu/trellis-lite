@@ -20,19 +20,30 @@ same machine without replacing each other.
 | --- | --- |
 | Platforms | Codex and OMP only; all other active platform integrations were removed. |
 | Change scope | Every durable task selects `P0–P3`, from exact requested edits to broad refactoring. |
-| Code verification | One shared frontend/backend level, `V0–V3`, with finite pass budgets. |
+| Code verification | One shared frontend/backend evidence level, `V0–V3`; focused evidence is recommended and verification may be deferred. |
 | Browser/UI verification | Independent `U0–U3`; `U0` means no browser or UI validation at all. |
 | UI driver | Ego Lite is the default for `U1–U3`. If it is unavailable, the agent reports that instead of installing or silently substituting a tool. |
 | E2E tools | Playwright, Cypress, Selenium, and project E2E suites run only when explicitly selected as the UI driver. |
 | Checker | Off by default. Report mode is read-only, runs once, and cannot enter a fix/recheck loop. |
-| OMP enforcement | Native runtime gates block implementation and verification actions that exceed the selected profile. |
+| OMP enforcement | Native runtime gates enforce the selected profile and keep internal circuit-breaker ceilings separate from the Agent's evidence plan. |
 | Codex enforcement | Project instructions, hooks, and the Codex sandbox/approval boundary carry the profile into the task. |
 | Upstream policy | Independent release line based on Trellis 0.6.16; no promise of continued upstream synchronization. |
 
-The selected profile is stored in `.trellis/tasks/<task>/task.json.lite`.
-Planning tasks fail closed until a valid profile has been recorded.
+The selected profile is stored in the `lite` field of
+`.trellis/tasks/<task>/task.json`. Planning tasks fail closed until a valid
+profile has been recorded.
 
-## Profile levels
+## Profiles and verification evidence
+
+Choose a preset as an input shortcut:
+
+- `quick`: `P0 / V0 / U0 / checker off`.
+- `focused` (recommended): `P1 / V1 / U0 / checker off`.
+- `release`: `P2 / V3 / U0 / checker off`.
+- `custom`: select the individual fields.
+
+Presets are not stored. Trellis records only the resolved P/V/U/checker/driver
+and path fields, and U may be overridden independently.
 
 `P` controls what may be changed:
 
@@ -43,45 +54,45 @@ Planning tasks fail closed until a valid profile has been recorded.
 - `P3`: broad refactoring or architectural change explicitly authorized by
   the user.
 
-`V` controls frontend and backend code checks together. It does not authorize
+`V` selects frontend and backend code evidence together. It does not authorize
 browser/UI automation:
 
-- `V0`: no commands; review the edited diff only.
-- `V1`: one focused check for the changed unit or file.
-- `V2`: focused tests plus the nearest relevant lint/typecheck/build check.
-- `V3`: the broader relevant suite, still with a finite retry budget.
+- `V0`: defer code verification.
+- `V1`: run one focused evidence batch for the changed behavior or file.
+- `V2`: run only the related checks selected in advance, once each.
+- `V3`: run only the selected release-readiness checklist, once each.
 
 `U` is an independent browser/UI decision:
 
-- `U0`: no browser, component-behavior script, screenshot comparison, or E2E
-  verification.
+- `U0`: defer browser, component-behavior, screenshot, and E2E evidence.
 - `U1`: one focused Ego Lite interaction on the changed path.
-- `U2`: the changed user flow and its primary state transition.
-- `U3`: a broader explicitly bounded UI regression pass.
+- `U2`: the selected user flow and its relevant boundary or error state.
+- `U3`: only the broader UI checklist selected in advance, once per flow.
 
-`V3 + U0` still forbids UI verification. `U1–U3` do not silently authorize
+`V3 + U0` still defers UI verification. `U1–U3` do not silently authorize
 Playwright, Cypress, or Selenium.
 
-In OMP, verification budgets are persistent for the pair **current session +
-active task**. Reloading the extension does not restore the budget, while a
-different task in the same session has its own counter. One Bash tool call
-counts as one pass in each applicable bucket; combining several test files in
-that call does not multiply the charge, and ordinary searches such as `rg
-test` are not charged. Code and UI counters remain independent.
+The authoritative Agent policy is the
+[Verification contract](./.trellis/workflow.md#verification-contract). It
+separates delivered implementation, verification evidence, deferred evidence,
+and release readiness. Every approved check runs once. After a failure, the
+Agent reports and waits for new natural-language authorization before repair or
+re-verification. This stop-and-ask behavior is an Agent contract because OMP
+cannot infer whether a command passed or failed.
 
-When a non-zero budget is exhausted, the user can grant exactly one additional
-pass from the OMP prompt:
+OMP keeps numeric ceilings internal as circuit breakers; unused capacity is not
+an evidence target. If a ceiling fires, the user may release the next matching
+verification action from the OMP prompt:
 
 ```text
 /trellis-authorize-verification code
 /trellis-authorize-verification ui
 ```
 
-The authorization cannot override `V0`, `U0`, or the selected UI driver. A
-single command containing both code checks and UI automation is allowed only
-when both budgets permit it, and then consumes one pass from each.
-The normal agent tool loop cannot invoke this OMP slash command directly;
-these budgets are workflow/runtime guards, not an OS-level security sandbox.
+Only one release may be outstanding at a time. After it is consumed, the user
+may authorize another. The command cannot override `V0`, `U0`, the selected UI
+driver, or the evidence already approved for the task, and the normal Agent tool
+loop cannot invoke it directly.
 
 ## Install the CLI
 
@@ -92,7 +103,7 @@ the `trellis-lite` and `tll` commands; an existing `trellis` command is left
 untouched.
 
 ```bash
-git clone --branch v1.0.2 --depth 1 https://github.com/izumi0uu/trellis-lite.git
+git clone --branch v1.1.0 --depth 1 https://github.com/izumi0uu/trellis-lite.git
 cd trellis-lite
 ./scripts/install-cli.sh
 
@@ -112,7 +123,7 @@ npm unlink --global trellis-lite
 ```
 
 The npm package names are reserved as `trellis-lite` and
-`trellis-lite-core`, but v1.0.2 should be installed from GitHub until those
+`trellis-lite-core`, but v1.1.0 should be installed from GitHub until those
 packages are visible on the public npm registry.
 
 ## Initialize a project

@@ -24,8 +24,9 @@ Before implementing, read in this order:
 
 1. **Understand specs** — read relevant spec files in `.trellis/spec/`
 2. **Understand task artifacts** — read the artifacts listed above
-3. **Implement features** — write code that follows specs and existing patterns
-4. **Self-check** — run lint and typecheck on the changed scope before reporting
+3. **Read the boundary** — read the `lite` field in the task's `task.json` and `.trellis/workflow.md`'s Verification contract
+4. **Implement features** — write code that follows specs and existing patterns
+5. **Collect evidence** — run only the approved evidence, once per check; a failure ends the round
 
 ## Forbidden Operations
 
@@ -39,9 +40,11 @@ The supervising main session owns commits. Report what changed; do not commit on
 
 1. Read relevant specs based on task type and the files in `implement.jsonl` if present
 2. Read the task's `prd.md`, `design.md` if present, and `implement.md` if present
-3. Implement features following specs and existing patterns
-4. Run the project's lint and typecheck commands on the changed scope
-5. Report files touched, key decisions, and verification results back to the channel
+3. Read the task's resolved Lite profile and Verification contract
+4. Implement features following specs and existing patterns
+5. Run only the checks approved by V/U and the selected plan, once each
+6. On failure, stop and report; wait for new natural-language user authorization before repair or re-verification
+7. Report the files touched and the contract states back to the channel
 
 ## Code Standards
 
@@ -53,18 +56,15 @@ The supervising main session owns commits. Report what changed; do not commit on
 ## Report Format
 
 ```
-## Implementation Complete
+## Implementation Report
 
 ### Files Modified
 - <path> — <one-line description>
 
-### Implementation Summary
-1. <step>
-2. <step>
-
-### Verification Results
-- Lint: <pass|fail|skipped + reason>
-- TypeCheck: <pass|fail|skipped + reason>
+Delivered: <implemented behavior, or incomplete + reason>
+Verified: <evidence run once and its result, or none>
+Deferred: <evidence intentionally left for later, or none>
+Blocks current goal: <yes/no + reason>
 
 ### Open Questions
 - <if any, otherwise omit>

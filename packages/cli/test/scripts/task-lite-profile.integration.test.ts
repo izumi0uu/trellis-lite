@@ -42,12 +42,41 @@ describe.skipIf(!hasPython())("task.py Lite execution profile", () => {
     const task = createTask("missing-profile");
     const result = runTask(repo, "start", task, "--allow-empty-context");
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("missing task.json.lite execution profile");
+    expect(result.stderr).toContain("missing lite execution profile in task.json");
     expect(result.stderr).toContain("set-lite-profile");
   });
 
-  it("writes P/V/U/checker choices and default independent budgets", () => {
-    const task = createTask("selected-profile");
+  it.each([
+    ["quick", "P0", "V0", "U0", "off"],
+    ["focused", "P1", "V1", "U0", "off"],
+    ["release", "P2", "V3", "U0", "off"],
+  ])(
+    "expands the %s preset without persisting preset or numeric budgets",
+    (preset, changeMode, verificationLevel, uiLevel, checker) => {
+      const task = createTask(`${preset}-preset`);
+      const set = runTask(repo, "set-lite-profile", task, "--preset", preset);
+      expect(set.status).toBe(0);
+
+      const data = JSON.parse(fs.readFileSync(path.join(repo, task, "task.json"), "utf-8"));
+      expect(data.lite).toEqual({
+        change_mode: changeMode,
+        verification_level: verificationLevel,
+        ui_verification_level: uiLevel,
+        checker,
+        ui_driver: "ego-lite",
+        allowed_paths: [],
+        forbidden_paths: [],
+        selected_by: "user",
+        scope_locked: true,
+      });
+      expect(data.lite).not.toHaveProperty("preset");
+      expect(data.lite).not.toHaveProperty("max_verification_passes");
+      expect(data.lite).not.toHaveProperty("max_ui_verification_passes");
+    },
+  );
+
+  it("keeps the legacy explicit P/V/U invocation compatible", () => {
+    const task = createTask("explicit-profile");
     const set = runTask(
       repo, "set-lite-profile", task,
       "--change-mode", "P0",
@@ -56,6 +85,8 @@ describe.skipIf(!hasPython())("task.py Lite execution profile", () => {
       "--checker", "report",
       "--allow", "frontend/**",
       "--forbid", "backend/**",
+      "--max-verification-passes", "99",
+      "--max-ui-verification-passes", "99",
     );
     expect(set.status).toBe(0);
 
@@ -70,25 +101,47 @@ describe.skipIf(!hasPython())("task.py Lite execution profile", () => {
       forbidden_paths: ["backend/**"],
       selected_by: "user",
       scope_locked: true,
-      max_verification_passes: 1,
-      max_ui_verification_passes: 0,
     });
+    expect(data.lite).not.toHaveProperty("max_verification_passes");
+    expect(data.lite).not.toHaveProperty("max_ui_verification_passes");
 
     const start = runTask(repo, "start", task, "--allow-empty-context");
     expect(start.status).toBe(0);
     expect(JSON.parse(fs.readFileSync(path.join(repo, task, "task.json"), "utf-8")).status).toBe("in_progress");
   });
 
-  it("rejects a non-zero UI budget for U0", () => {
-    const task = createTask("invalid-u0-budget");
+  it("lets explicit policy fields override a named preset", () => {
+    const task = createTask("overridden-preset");
     const result = runTask(
       repo, "set-lite-profile", task,
+      "--preset", "quick",
+      "--change-mode", "P3",
+      "--verification-level", "V2",
+      "--ui-verification-level", "U1",
+      "--checker", "report",
+      "--ui-driver", "playwright",
+    );
+    expect(result.status).toBe(0);
+
+    const data = JSON.parse(fs.readFileSync(path.join(repo, task, "task.json"), "utf-8"));
+    expect(data.lite).toMatchObject({
+      change_mode: "P3",
+      verification_level: "V2",
+      ui_verification_level: "U1",
+      checker: "report",
+      ui_driver: "playwright",
+    });
+  });
+
+  it("requires explicit P/V/U values for the custom preset", () => {
+    const task = createTask("incomplete-custom");
+    const result = runTask(
+      repo, "set-lite-profile", task,
+      "--preset", "custom",
       "--change-mode", "P1",
       "--verification-level", "V2",
-      "--ui-verification-level", "U0",
-      "--max-ui-verification-passes", "1",
     );
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("cannot exceed 0 for U0");
+    expect(result.stderr).toContain("--preset custom requires explicit --ui-verification-level");
   });
 });

@@ -5,7 +5,7 @@ description: "Runs one read-only Trellis Lite review when checker=report; never 
 
 # Trellis Lite Check
 
-Perform one bounded, report-only review when `task.json.lite.checker` is `report`. If it is `off`, do not run a checker.
+Perform one bounded, report-only review when the `lite.checker` field in the active task's `task.json` is `report`. If it is `off`, do not run a checker.
 
 ## Rules
 

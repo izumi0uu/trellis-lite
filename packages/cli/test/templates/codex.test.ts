@@ -148,6 +148,29 @@ describe("codex sub-agent recursion guard (issue #234)", () => {
   }
 });
 
+describe("codex implement verification contract", () => {
+  it("keeps verification evidence bounded by the selected Lite profile", () => {
+    const content = fs.readFileSync(
+      path.join(
+        repoRoot,
+        "packages/cli/src/templates/codex/agents/trellis-implement.toml",
+      ),
+      "utf-8",
+    );
+
+    expect(content).toContain("Verification contract");
+    expect(content).toContain("Run only the approved V/U evidence");
+    expect(content).toContain("once per selected check");
+    expect(content).toContain("Internal verification ceilings are circuit breakers");
+    expect(content).toContain("If a check fails, stop and report");
+    expect(content).toContain("new natural-language user authorization");
+    expect(content).toContain("Delivered");
+    expect(content).toContain("Verified");
+    expect(content).toContain("Deferred");
+    expect(content).toContain("Blocks current goal");
+  });
+});
+
 describe("codex two-channel sub-agent context (native SubagentStart)", () => {
   for (const name of [
     "trellis-implement",

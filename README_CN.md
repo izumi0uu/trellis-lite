@@ -18,19 +18,29 @@ Lite 与官方 Trellis 可以共存，不会互相覆盖。
 | --- | --- |
 | 平台 | 只保留 Codex 和 OMP；其他活动平台集成均已删除。 |
 | 改动范围 | 每个正式任务选择 `P0–P3`，从“只改明确要求”到“大范围重构”。 |
-| 代码验证 | 前后端共用一个 `V0–V3`，且每级都有有限执行次数。 |
+| 代码验证 | 前后端共用一个 `V0–V3` 证据等级；推荐聚焦验证，也可以延期。 |
 | 浏览器/UI 验证 | 独立选择 `U0–U3`；`U0` 表示完全不做浏览器或 UI 验证。 |
 | UI driver | `U1–U3` 默认使用 Ego Lite；若不可用，只提醒用户，不自动安装或静默换工具。 |
 | E2E 工具 | 只有用户明确选择时，才运行 Playwright、Cypress、Selenium 或项目 E2E 套件。 |
 | Checker | 默认关闭；report 模式只读、只运行一次，不能形成“修复—复查”循环。 |
-| OMP 约束 | 原生运行时门禁阻止超出当前 profile 的实现和验证动作。 |
+| OMP 约束 | 原生运行时门禁执行当前 profile，并把内部熔断上限与 Agent 的证据计划分开。 |
 | Codex 约束 | 项目说明、hooks 与 Codex 自身 sandbox/approval 边界共同携带 profile。 |
 | 上游策略 | 以 Trellis 0.6.16 为独立基线，不承诺继续同步上游。 |
 
-选择结果写入 `.trellis/tasks/<task>/task.json.lite`。planning 任务在记录有效
-profile 之前会 fail closed，不能直接进入实现。
+选择结果写入 `.trellis/tasks/<task>/task.json` 的 `lite` 字段。planning 任务在
+记录有效 profile 之前会 fail closed，不能直接进入实现。
 
-## P / V / U 等级
+## Profile 与验证证据
+
+先选择一个输入快捷方式：
+
+- `quick`：`P0 / V0 / U0 / checker off`。
+- `focused`（推荐）：`P1 / V1 / U0 / checker off`。
+- `release`：`P2 / V3 / U0 / checker off`。
+- `custom`：逐项选择。
+
+preset 本身不会持久化。Trellis 只记录解析后的 P/V/U/checker/driver 与路径
+字段；U 仍可独立覆盖。
 
 `P` 控制允许改什么：
 
@@ -39,49 +49,50 @@ profile 之前会 fail closed，不能直接进入实现。
 - `P2`：允许在声明的任务边界内进行常规跨层实现。
 - `P3`：允许用户明确授权的大范围重构或架构调整。
 
-`V` 同时控制前端和后端代码检查，不授权浏览器/UI 自动化：
+`V` 同时选择前端和后端代码证据，不授权浏览器/UI 自动化：
 
-- `V0`：不运行命令，只审阅本次 diff。
-- `V1`：对改动文件或单元执行一次聚焦检查。
-- `V2`：聚焦测试，加最近相关的 lint/typecheck/build。
-- `V3`：运行更广的相关套件，但仍有有限重试预算。
+- `V0`：延期代码验证。
+- `V1`：针对改动行为或文件运行一个聚焦证据批次。
+- `V2`：只运行预先选定的相关检查，每项一次。
+- `V3`：只运行预先选定的发布就绪清单，每项一次。
 
 `U` 是独立的浏览器/UI 选择：
 
-- `U0`：不使用浏览器、组件行为脚本、截图对比或 E2E 验证。
+- `U0`：延期浏览器、组件行为、截图与 E2E 证据。
 - `U1`：用 Ego Lite 对改动路径做一次聚焦交互。
-- `U2`：验证改动用户流程及其主要状态变化。
-- `U3`：执行范围明确的较广 UI 回归。
+- `U2`：运行选定的用户流程及其相关边界或错误状态。
+- `U3`：只运行预先选定的较广 UI 清单，每条流程一次。
 
-即使选择 `V3 + U0`，也不能做 UI 验证；`U1–U3` 也不会自动授权
+即使选择 `V3 + U0`，UI 验证仍然延期；`U1–U3` 也不会自动授权
 Playwright、Cypress 或 Selenium。
 
-在 OMP 中，验证预算按“**当前会话 + 当前任务**”持久记录。重载扩展
-不会恢复预算；同一会话切换到另一个任务时，使用独立计数。一次 Bash
-tool call 在每个适用的预算中最多计一次；同一命令合并多个测试文件不会
-多扣，`rg test` 这类普通搜索也不会被误计。V 与 U 始终分开计数。
+Agent 的唯一权威规则是
+[验证合同](./.trellis/workflow.md#verification-contract)。它分别报告已交付实现、
+验证证据、延期证据与发布就绪状态。每项获批检查只运行一次；任何失败后，
+Agent 都先报告并等待用户新的自然语言授权，再修复或复验。OMP 无法判断命令
+是否通过，因此“失败即停并询问”属于 Agent 合同。
 
-非零预算用完后，用户可以在 OMP 输入框授权恰好一次额外验证：
+OMP 只把数字上限当内部熔断器，未使用余量不是证据目标。熔断触发后，用户可在
+OMP 输入框放行下一条匹配的验证动作：
 
 ```text
 /trellis-authorize-verification code
 /trellis-authorize-verification ui
 ```
 
-这个授权不能绕过 `V0`、`U0` 或已选 UI driver。如果同一条命令同时包含
-代码检查和 UI 自动化，必须两个预算都允许才执行，并各消耗一次。
-正常的 agent tool loop 不能直接调用这个 OMP slash 命令；验证预算是
-工作流/运行时约束，不是操作系统级安全沙箱。
+同一时间只能挂起一次放行；消费后，用户可以再次授权。这个命令不能绕过
+`V0`、`U0`、已选 UI driver 或任务已经批准的证据范围，正常的 Agent tool
+loop 也不能直接调用它。
 
 ## 安装 CLI
 
 需要 Node.js 18.17+、Python 3.9+ 与 pnpm 10。
 
-当前标准安装方式是从 GitHub 的 v1.0.2 tag 构建并链接。安装只创建
+当前标准安装方式是从 GitHub 的 v1.1.0 tag 构建并链接。安装只创建
 `trellis-lite` 和 `tll`，不会覆盖机器上已有的 `trellis`：
 
 ```bash
-git clone --branch v1.0.2 --depth 1 https://github.com/izumi0uu/trellis-lite.git
+git clone --branch v1.1.0 --depth 1 https://github.com/izumi0uu/trellis-lite.git
 cd trellis-lite
 ./scripts/install-cli.sh
 
@@ -99,7 +110,7 @@ workspace，然后用全局 npm link 指向当前 checkout；它不会使用 `su
 npm unlink --global trellis-lite
 ```
 
-npm 包名已确定为 `trellis-lite` 和 `trellis-lite-core`。在 v1.0.2 尚未出现在
+npm 包名已确定为 `trellis-lite` 和 `trellis-lite-core`。在 v1.1.0 尚未出现在
 公共 npm registry 之前，应继续使用 GitHub 安装方式。
 
 ## 初始化项目

@@ -221,15 +221,15 @@ export function resolvePlaceholdersNeutral(
 /** Skill description registry — maps template name to auto-trigger description. */
 const SKILL_DESCRIPTIONS: Record<string, string> = {
   start:
-    "Starts or resumes the bounded Trellis Lite workflow, loading the active task and its P/V/U/checker execution profile.",
+    "Starts or resumes Trellis Lite, resolves a profile shortcut, and applies the active task's Verification contract.",
   continue:
-    "Resume the current Trellis Lite task at planning, bounded implementation, or completion.",
+    "Resumes the current Trellis Lite task and reports implementation, evidence, deferrals, and current-goal blockers separately.",
   "finish-work":
-    "Wrap up the current session: verify quality gate passed, remind user to commit, archive completed tasks, and record session progress to the developer journal. Use when done coding and ready to end the session.",
+    "Wraps up implemented work without adding verification: checks repository state, archives selected completed tasks, and records the developer journal. Use when ready to end the session.",
   "before-dev":
     "Discovers and injects project-specific coding guidelines from .trellis/spec/ before implementation begins. Reads spec indexes, pre-development checklists, and shared thinking guides for the target package. Use when starting a new coding task, before writing any code, switching to a different package, or needing to refresh project conventions and standards.",
   brainstorm:
-    "Creates a concise implementation plan and asks only for unresolved scope plus P/V/U/checker choices.",
+    "Creates a concise implementation plan, offers Lite profile shortcuts, and records only unresolved scope and evidence choices.",
   check:
     "Runs one read-only Trellis Lite review when checker=report; never edits, verifies, or starts a fix/check loop.",
   "break-loop":
@@ -265,7 +265,7 @@ const COMMAND_DESCRIPTIONS: Record<string, string> = {
   start: "Initialize a Trellis development session.",
   continue: "Resume work on the current task at the correct phase.",
   "finish-work":
-    "Wrap up the current session: quality gate, commit reminder, archive, journal.",
+    "Wrap up implemented work: repository state, archive, and journal.",
 };
 
 /** Wrap resolved command content with YAML frontmatter (name + description). */

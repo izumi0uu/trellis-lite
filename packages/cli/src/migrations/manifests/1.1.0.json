@@ -1,0 +1,9 @@
+{
+  "version": "1.1.0",
+  "description": "Replaces Agent-visible verification budgets with lightweight profile presets and an evidence contract",
+  "breaking": false,
+  "recommendMigrate": false,
+  "changelog": "**Verification is evidence, not a quota:**\n- Adds quick, focused, release, and custom profile shortcuts without persisting a redundant preset field.\n- Reframes V0/V1/V2/V3 as deferred, focused, selected relevant, and release-readiness evidence.\n- Stops the Agent after a failed check until the user authorizes repair or re-verification.\n- Separates Delivered, Verified, Deferred, and Blocks current goal in completion reports.\n- Removes numeric max-pass fields from new task profiles and cleans them from recognized active profiles during normal update.\n- Keeps OMP ceilings internal, hides remaining counts, and preserves repeatable one-command user authorization after each prior release is consumed.\n- Retains the old max-pass CLI flags as hidden, ignored compatibility inputs so v1.0.x automation remains parseable.",
+  "migrations": [],
+  "notes": "Run trellis-lite update normally; --migrate is not required. Reload or restart an already-running OMP extension once after updating."
+}

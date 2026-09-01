@@ -139,18 +139,8 @@ const PROTECTED_PATHS = [
 ];
 
 const LITE_CHANGE_MODES = new Set(["P0", "P1", "P2", "P3"]);
-const LITE_VERIFICATION_CAPS: Readonly<Record<string, number>> = {
-  V0: 0,
-  V1: 1,
-  V2: 3,
-  V3: 8,
-};
-const LITE_UI_VERIFICATION_CAPS: Readonly<Record<string, number>> = {
-  U0: 0,
-  U1: 1,
-  U2: 1,
-  U3: 3,
-};
+const LITE_VERIFICATION_LEVELS = new Set(["V0", "V1", "V2", "V3"]);
+const LITE_UI_VERIFICATION_LEVELS = new Set(["U0", "U1", "U2", "U3"]);
 const LITE_CHECKER_MODES = new Set(["off", "report"]);
 const LITE_UI_DRIVERS = new Set([
   "ego-lite",
@@ -190,25 +180,6 @@ function isNonEmptyStringArray(value: unknown): value is string[] {
   );
 }
 
-function isPassLimit(value: unknown, cap: number): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isInteger(value) &&
-    value >= 0 &&
-    value <= cap
-  );
-}
-
-function passCapFor(
-  caps: Readonly<Record<string, number>>,
-  level: unknown,
-): number | null {
-  return typeof level === "string" &&
-    Object.prototype.hasOwnProperty.call(caps, level)
-    ? caps[level]
-    : null;
-}
-
 function migrateLegacyLiteProfile(
   taskData: Record<string, unknown>,
 ):
@@ -221,12 +192,11 @@ function migrateLegacyLiteProfile(
 
   const changeMode = profile.change_mode;
   const verificationLevel = profile.verification_level;
-  const verificationCap = passCapFor(LITE_VERIFICATION_CAPS, verificationLevel);
   if (
     typeof changeMode !== "string" ||
     !LITE_CHANGE_MODES.has(changeMode) ||
     typeof verificationLevel !== "string" ||
-    verificationCap === null
+    !LITE_VERIFICATION_LEVELS.has(verificationLevel)
   ) {
     return { warning: "legacy profile has an unknown P/V level" };
   }
@@ -250,8 +220,10 @@ function migrateLegacyLiteProfile(
     profile.ui_verification_level === undefined
       ? "U0"
       : profile.ui_verification_level;
-  const uiVerificationCap = passCapFor(LITE_UI_VERIFICATION_CAPS, uiLevel);
-  if (typeof uiLevel !== "string" || uiVerificationCap === null) {
+  if (
+    typeof uiLevel !== "string" ||
+    !LITE_UI_VERIFICATION_LEVELS.has(uiLevel)
+  ) {
     return { warning: "legacy profile has an unknown UI verification level" };
   }
   const uiDriver =
@@ -263,30 +235,15 @@ function migrateLegacyLiteProfile(
     return { warning: "legacy profile has an invalid scope lock" };
   }
 
-  const maxVerificationPasses =
-    profile.max_verification_passes === undefined
-      ? verificationCap
-      : profile.max_verification_passes;
-  if (!isPassLimit(maxVerificationPasses, verificationCap)) {
-    return { warning: "legacy profile has an invalid code verification cap" };
-  }
-  const maxUiVerificationPasses =
-    profile.max_ui_verification_passes === undefined
-      ? uiVerificationCap
-      : profile.max_ui_verification_passes;
-  if (!isPassLimit(maxUiVerificationPasses, uiVerificationCap)) {
-    return { warning: "legacy profile has an invalid UI verification cap" };
-  }
-
   const migratedProfile: Record<string, unknown> = {
     ...profile,
     checker,
     ui_verification_level: uiLevel,
     ui_driver: uiDriver,
     scope_locked: true,
-    max_verification_passes: maxVerificationPasses,
-    max_ui_verification_passes: maxUiVerificationPasses,
   };
+  delete migratedProfile.max_verification_passes;
+  delete migratedProfile.max_ui_verification_passes;
   if (JSON.stringify(migratedProfile) === JSON.stringify(profile)) return null;
   return {
     data: { ...taskData, lite: migratedProfile },

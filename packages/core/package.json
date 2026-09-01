@@ -1,6 +1,6 @@
 {
   "name": "trellis-lite-core",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Trellis Lite core SDK for Codex/OMP task, channel, and memory primitives",
   "type": "module",
   "main": "./dist/index.js",

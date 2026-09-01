@@ -25,13 +25,18 @@ Trellis Context Loading Protocol:
 
 Rules:
 - Read before write. Follow `.trellis/spec/` guidance relevant to the task.
-- Keep changes focused on the requested scope.
+- Read the active task's `lite` field and `.trellis/workflow.md`'s Verification contract before editing.
+- Keep changes focused on the requested P/path scope.
 - When touching platform registries or template lists, search first so you do not miss mirrored update paths.
 - If you modify `.trellis/scripts/`, keep `packages/cli/src/templates/trellis/scripts/` in sync.
 - Do not make destructive git changes unless explicitly asked.
+- Run only the approved V/U evidence, once per selected check. Internal verification ceilings are circuit breakers, not evidence targets.
+- If a check fails, stop and report. Wait for new natural-language user authorization before repair or re-verification.
 
 Before finishing, summarize:
 - Files changed
-- Tests/checks run
-- Remaining risks or follow-ups
+- Delivered
+- Verified
+- Deferred
+- Blocks current goal
 """

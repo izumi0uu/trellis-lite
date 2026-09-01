@@ -86,15 +86,34 @@ VERIFICATION_LEVELS = ("V0", "V1", "V2", "V3")
 UI_VERIFICATION_LEVELS = ("U0", "U1", "U2", "U3")
 CHECKER_MODES = ("off", "report")
 UI_DRIVERS = ("ego-lite", "playwright", "cypress", "selenium", "project-suite")
-DEFAULT_VERIFICATION_PASSES = {"V0": 0, "V1": 1, "V2": 3, "V3": 8}
-DEFAULT_UI_VERIFICATION_PASSES = {"U0": 0, "U1": 1, "U2": 1, "U3": 3}
+LITE_PRESETS = ("quick", "focused", "release", "custom")
+LITE_PRESET_DEFAULTS = {
+    "quick": {
+        "change_mode": "P0",
+        "verification_level": "V0",
+        "ui_verification_level": "U0",
+        "checker": "off",
+    },
+    "focused": {
+        "change_mode": "P1",
+        "verification_level": "V1",
+        "ui_verification_level": "U0",
+        "checker": "off",
+    },
+    "release": {
+        "change_mode": "P2",
+        "verification_level": "V3",
+        "ui_verification_level": "U0",
+        "checker": "off",
+    },
+}
 
 
 def _lite_profile_error(data: dict) -> str | None:
-    """Return a user-facing validation error for ``task.json.lite``."""
+    """Return a user-facing validation error for ``task.json``'s ``lite`` field."""
     profile = data.get("lite")
     if not isinstance(profile, dict):
-        return "missing task.json.lite execution profile"
+        return "missing lite execution profile in task.json"
 
     expected = (
         ("change_mode", CHANGE_MODES),
@@ -117,23 +136,11 @@ def _lite_profile_error(data: dict) -> str | None:
         return "lite.scope_locked must be true"
     if not isinstance(profile.get("selected_by"), str) or not profile["selected_by"].strip():
         return "lite.selected_by must be a non-empty string"
-
-    for field in ("max_verification_passes", "max_ui_verification_passes"):
-        value = profile.get(field)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            return f"lite.{field} must be a non-negative integer"
-
-    verification_cap = DEFAULT_VERIFICATION_PASSES[profile["verification_level"]]
-    if profile["max_verification_passes"] > verification_cap:
-        return f"lite.max_verification_passes cannot exceed {verification_cap} for {profile['verification_level']}"
-    ui_cap = DEFAULT_UI_VERIFICATION_PASSES[profile["ui_verification_level"]]
-    if profile["max_ui_verification_passes"] > ui_cap:
-        return f"lite.max_ui_verification_passes cannot exceed {ui_cap} for {profile['ui_verification_level']}"
     return None
 
 
 def cmd_set_lite_profile(args: argparse.Namespace) -> int:
-    """Write the user-selected bounded execution profile to an existing task."""
+    """Write the user-selected execution profile to an existing task."""
     repo_root = get_repo_root()
     task_dir = resolve_task_dir(args.dir, repo_root)
     if task_dir is None:
@@ -146,26 +153,46 @@ def cmd_set_lite_profile(args: argparse.Namespace) -> int:
         print(hint, file=sys.stderr)
         return 1
 
+    preset_defaults = LITE_PRESET_DEFAULTS.get(args.preset, {})
+    change_mode = args.change_mode or preset_defaults.get("change_mode")
+    verification_level = args.verification_level or preset_defaults.get("verification_level")
+    ui_verification_level = (
+        args.ui_verification_level or preset_defaults.get("ui_verification_level")
+    )
+    missing = [
+        flag
+        for flag, value in (
+            ("--change-mode", change_mode),
+            ("--verification-level", verification_level),
+            ("--ui-verification-level", ui_verification_level),
+        )
+        if value is None
+    ]
+    if missing:
+        mode = (
+            "--preset custom"
+            if args.preset == "custom"
+            else "set-lite-profile without a named preset"
+        )
+        print(
+            colored(
+                f"Error: {mode} requires explicit {', '.join(missing)}",
+                Colors.RED,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
     profile = {
-        "change_mode": args.change_mode,
-        "verification_level": args.verification_level,
-        "ui_verification_level": args.ui_verification_level,
-        "checker": args.checker,
+        "change_mode": change_mode,
+        "verification_level": verification_level,
+        "ui_verification_level": ui_verification_level,
+        "checker": args.checker or preset_defaults.get("checker", "off"),
         "ui_driver": args.ui_driver,
         "allowed_paths": args.allowed_path or [],
         "forbidden_paths": args.forbidden_path or [],
         "selected_by": args.selected_by,
         "scope_locked": True,
-        "max_verification_passes": (
-            args.max_verification_passes
-            if args.max_verification_passes is not None
-            else DEFAULT_VERIFICATION_PASSES[args.verification_level]
-        ),
-        "max_ui_verification_passes": (
-            args.max_ui_verification_passes
-            if args.max_ui_verification_passes is not None
-            else DEFAULT_UI_VERIFICATION_PASSES[args.ui_verification_level]
-        ),
     }
     candidate = {**data, "lite": profile}
     error = _lite_profile_error(candidate)
@@ -346,8 +373,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(colored(f"Error: {profile_error}", Colors.RED), file=sys.stderr)
             print(
                 "Run `python3 .trellis/scripts/task.py set-lite-profile <task> "
-                "--change-mode P0 --verification-level V1 "
-                "--ui-verification-level U0` after asking the user.",
+                "--preset focused` after asking the user.",
                 file=sys.stderr,
             )
             return 1
@@ -661,7 +687,7 @@ Usage:
   python3 task.py set-base-branch <dir> <branch>     Set PR target branch
   python3 task.py set-scope <dir> <scope>            Set scope for PR title
   python3 task.py set-meta <dir> <key> <value>       Set/overwrite a task metadata key
-  python3 task.py set-lite-profile <dir> [options]   Set P/V/U/checker execution limits
+  python3 task.py set-lite-profile <dir> [options]   Set a Lite preset or explicit P/V/U/checker policy
   python3 task.py rename <dir> <new-slug>            Rename task, identity fields and references
   python3 task.py archive <task-dir>                 Archive completed task
   python3 task.py add-subtask <parent> <child>       Link child task to parent
@@ -696,7 +722,7 @@ Examples:
   python3 task.py create "Add login feature" --description "Email + password sign-in" --meta linear=ENG-123 --meta epic=auth
   python3 task.py create "Child task" --description "Session cookie handling" --slug child --parent .trellis/tasks/01-21-parent
   python3 task.py add-context <dir> implement .trellis/spec/cli/backend/auth.md "Auth guidelines"
-  python3 task.py set-lite-profile <dir> --change-mode P0 --verification-level V1 --ui-verification-level U0
+  python3 task.py set-lite-profile <dir> --preset focused
   python3 task.py set-branch <dir> task/add-login
   python3 task.py start .trellis/tasks/01-21-add-login
   python3 task.py current --source
@@ -846,19 +872,23 @@ def main() -> int:
     # set-lite-profile
     p_lite = subparsers.add_parser(
         "set-lite-profile",
-        help="Record user-selected change, code verification, and UI verification limits",
+        help="Record a user-selected Lite preset or explicit P/V/U/checker policy",
     )
     p_lite.add_argument("dir", help="Task directory")
-    p_lite.add_argument("--change-mode", choices=CHANGE_MODES, required=True)
-    p_lite.add_argument("--verification-level", choices=VERIFICATION_LEVELS, required=True)
-    p_lite.add_argument("--ui-verification-level", choices=UI_VERIFICATION_LEVELS, required=True)
-    p_lite.add_argument("--checker", choices=CHECKER_MODES, default="off")
+    p_lite.add_argument("--preset", choices=LITE_PRESETS)
+    p_lite.add_argument("--change-mode", choices=CHANGE_MODES)
+    p_lite.add_argument("--verification-level", choices=VERIFICATION_LEVELS)
+    p_lite.add_argument("--ui-verification-level", choices=UI_VERIFICATION_LEVELS)
+    p_lite.add_argument("--checker", choices=CHECKER_MODES)
     p_lite.add_argument("--ui-driver", choices=UI_DRIVERS, default="ego-lite")
     p_lite.add_argument("--allow", dest="allowed_path", action="append", default=[])
     p_lite.add_argument("--forbid", dest="forbidden_path", action="append", default=[])
     p_lite.add_argument("--selected-by", default="user")
-    p_lite.add_argument("--max-verification-passes", type=int)
-    p_lite.add_argument("--max-ui-verification-passes", type=int)
+    # Compatibility-only: v1.0.x exposed numeric pass overrides. Keep old
+    # automation parseable, but hide and ignore the values so they never
+    # re-enter the task profile or Agent context.
+    p_lite.add_argument("--max-verification-passes", type=int, help=argparse.SUPPRESS)
+    p_lite.add_argument("--max-ui-verification-passes", type=int, help=argparse.SUPPRESS)
 
     # rename
     p_rename = subparsers.add_parser("rename", help="Rename task and its references")

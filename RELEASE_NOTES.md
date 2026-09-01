@@ -1,3 +1,64 @@
+# Trellis Lite v1.1.0
+
+This release replaces Agent-visible numeric verification budgets with a
+user-selected evidence contract. It keeps OMP's counters only as internal
+circuit breakers, so unused capacity no longer looks like work the Agent
+should perform.
+
+## Lightweight profile shortcuts
+
+- `quick` resolves to `P0 / V0 / U0 / checker off` for small changes whose
+  verification can wait.
+- `focused` resolves to `P1 / V1 / U0 / checker off` and is the recommended
+  default for normal implementation work.
+- `release` resolves to `P2 / V3 / U0 / checker off` for a named
+  release-readiness evidence set.
+- `custom` keeps P, V, U, checker, driver, and path choices independent.
+
+Presets are input shortcuts rather than persistent state. Only their resolved
+profile fields are stored, and U may still be overridden independently.
+
+## Verification is evidence
+
+- `V0` explicitly defers code verification instead of making implementation
+  incomplete.
+- `V1` runs one focused evidence batch.
+- `V2` runs only the related checks selected in advance, once each.
+- `V3` runs only the selected release-readiness checklist, once each.
+- A failed check ends the verification round. The Agent reports the result and
+  waits for new natural-language authorization before repair or re-verification.
+- Completion reports now separate `Delivered`, `Verified`, `Deferred`, and
+  `Blocks current goal`.
+
+Frontend and backend continue to share one V level. Browser/UI evidence remains
+independent under U; `U0` still forbids browser and UI verification.
+
+## Hidden OMP safety ceilings
+
+- New task profiles no longer contain `max_verification_passes` or
+  `max_ui_verification_passes`, so numeric capacity is absent from Agent task
+  context.
+- `trellis-lite update` removes those fields from recognized active profiles
+  without rejecting unusual old values.
+- OMP derives its ceilings internally, never prints a remaining count, and
+  describes exhaustion as a safety ceiling rather than a budget target.
+- `/trellis-authorize-verification code|ui` releases only the next matching
+  command. One release may be outstanding; after consumption, the user may
+  authorize another.
+- Legacy scripts may still pass the two old max-pass CLI flags. They are hidden
+  compatibility inputs whose values are ignored and never persisted.
+
+## Upgrade
+
+Install v1.1.0 and run `trellis-lite update` in every Lite project. The normal
+update path refreshes managed workflow/Agent/OMP files and normalizes active
+profiles; no `--migrate` flag is required. Reload or restart an already-running
+OMP extension once after updating.
+
+Public npm publication remains separate from this GitHub source release.
+
+---
+
 # Trellis Lite v1.0.2
 
 This release makes OMP verification budgets durable and task-aware, removes

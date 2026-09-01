@@ -54,7 +54,7 @@ describe("trellis-lite update active Lite profile migration", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("migrates only active legacy Lite profiles and is idempotent at the same version", async () => {
+  it("removes legacy pass fields from recognized active profiles and is idempotent", async () => {
     const legacyPath = writeTask(root, "09-01-legacy", {
       name: "legacy",
       status: "in_progress",
@@ -65,7 +65,8 @@ describe("trellis-lite update active Lite profile migration", () => {
         allowed_paths: ["backend/**"],
         forbidden_paths: ["frontend/**"],
         selected_by: "user",
-        max_verification_passes: 4,
+        max_verification_passes: "not-a-valid-cap",
+        max_ui_verification_passes: -99,
       },
     });
     const legacyBefore = fs.readFileSync(legacyPath, "utf-8");
@@ -89,11 +90,28 @@ describe("trellis-lite update active Lite profile migration", () => {
         forbidden_paths: [],
         selected_by: "user",
         scope_locked: true,
-        max_verification_passes: 2,
-        max_ui_verification_passes: 1,
       },
     });
     const currentBefore = fs.readFileSync(currentPath, "utf-8");
+
+    const v102Profile = {
+      change_mode: "P3",
+      verification_level: "V3",
+      ui_verification_level: "U0",
+      checker: "off",
+      ui_driver: "ego-lite",
+      allowed_paths: ["backend/**", "frontend/**"],
+      forbidden_paths: ["infra/**"],
+      selected_by: "user",
+      scope_locked: true,
+      max_verification_passes: 8,
+      max_ui_verification_passes: 0,
+    };
+    const v102Path = writeTask(root, "09-01-v1-0-2-profile", {
+      name: "v1-0-2-profile",
+      status: "in_progress",
+      lite: v102Profile,
+    });
 
     const unknownPath = writeTask(root, "09-01-unknown-profile", {
       name: "unknown-profile",
@@ -137,9 +155,14 @@ describe("trellis-lite update active Lite profile migration", () => {
       ui_verification_level: "U0",
       ui_driver: "ego-lite",
       scope_locked: true,
-      max_verification_passes: 4,
-      max_ui_verification_passes: 0,
     });
+    expect(migrated.lite).not.toHaveProperty("max_verification_passes");
+    expect(migrated.lite).not.toHaveProperty("max_ui_verification_passes");
+    const migratedV102 = JSON.parse(fs.readFileSync(v102Path, "utf-8"));
+    const expectedV102Profile: Record<string, unknown> = { ...v102Profile };
+    delete expectedV102Profile.max_verification_passes;
+    delete expectedV102Profile.max_ui_verification_passes;
+    expect(migratedV102.lite).toEqual(expectedV102Profile);
     expect(fs.readFileSync(nonLitePath, "utf-8")).toBe(nonLiteBefore);
     expect(fs.readFileSync(currentPath, "utf-8")).toBe(currentBefore);
     expect(fs.readFileSync(unknownPath, "utf-8")).toBe(unknownBefore);
@@ -190,6 +213,8 @@ describe("trellis-lite update active Lite profile migration", () => {
         allowed_paths: [],
         forbidden_paths: [],
         selected_by: "user",
+        max_verification_passes: 999,
+        max_ui_verification_passes: "invalid",
       },
     });
     const before = fs.readFileSync(legacyPath, "utf-8");
